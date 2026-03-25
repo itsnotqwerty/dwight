@@ -34,10 +34,13 @@ def generate_tokens(
 ) -> Iterator[str]:
     """Yield decoded token strings one at a time."""
     prompt_ids = tokenizer.encode(prompt)
+    eot = tokenizer.eot_token
     for token_id in model.generate(
         prompt_ids,
         max_new_tokens=max_tokens,
         temperature=temperature,
         top_p=top_p,
     ):
+        if token_id == eot:
+            break
         yield tokenizer.decode([token_id])
