@@ -85,16 +85,16 @@ def predict(
     model.eval()
 
     click.echo(prompt, nl=False)
-    for token_str in (
-        tokenizer.decode([tid])
-        for tid in model.generate(
-            tokenizer.encode(prompt),
-            max_new_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-        )
+    eot = tokenizer.eot_token
+    for tid in model.generate(
+        tokenizer.encode(prompt),
+        max_new_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
     ):
-        click.echo(token_str, nl=False)
+        if tid == eot:
+            break
+        click.echo(tokenizer.decode([tid]), nl=False)
     click.echo()
 
 
