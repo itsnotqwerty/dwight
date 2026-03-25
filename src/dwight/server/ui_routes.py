@@ -10,12 +10,20 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Form
 from fastapi.requests import Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from .auth import (
+    check_password,
+    delete_session_cookie,
+    is_authenticated,
+    login_redirect_response,
+    require_auth,
+    set_session_cookie,
+)
 from .generation import generate_tokens
 
 ui_router = APIRouter()
@@ -31,7 +39,7 @@ _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 
 @ui_router.get("/")
-async def inference_page(request: Request):
+async def inference_page(request: Request, _: None = Depends(require_auth)):
     return _templates.TemplateResponse(request, "inference.html")
 
 
@@ -42,6 +50,7 @@ async def generate_sse(
     max_tokens: int = 256,
     temperature: float = 1.0,
     top_p: float = 1.0,
+    _: None = Depends(require_auth),
 ):
     model = request.app.state.model
     tokenizer = request.app.state.tokenizer
@@ -107,7 +116,7 @@ class TrainStartRequest(BaseModel):
 
 
 @ui_router.get("/train")
-async def train_page(request: Request):
+async def train_page(request: Request, _: None = Depends(require_auth)):
     from ..config import ModelConfig
 
     config = ModelConfig()
@@ -137,7 +146,7 @@ async def train_page(request: Request):
 
 
 @ui_router.post("/ui/train/start")
-async def train_start(body: TrainStartRequest, request: Request):
+async def train_start(body: TrainStartRequest, request: Request, _: None = Depends(require_auth)):
     app = request.app
     process = app.state.training_process
     if process is not None and process.returncode is None:
@@ -175,7 +184,7 @@ async def train_start(body: TrainStartRequest, request: Request):
 
 
 @ui_router.post("/ui/train/stop")
-async def train_stop(request: Request):
+async def train_stop(request: Request, _: None = Depends(require_auth)):
     process = request.app.state.training_process
     if process is None or process.returncode is not None:
         return {"ok": False, "error": "No training process is running."}
@@ -218,7 +227,7 @@ async def _stream_training_output(app) -> None:
 
 
 @ui_router.get("/ui/train/logs")
-async def train_logs_sse(request: Request):
+async def train_logs_sse(request: Request, _: None = Depends(require_auth)):
     async def event_stream():
         last_status: Optional[str] = None
 
@@ -251,3 +260,38 @@ async def train_logs_sse(request: Request):
     return StreamingResponse(
         event_stream(), media_type="text/event-stream", headers=_SSE_HEADERS
     )
+
+
+# ---------------------------------------------------------------------------
+# Auth – login / logout
+# ---------------------------------------------------------------------------
+
+
+@ui_router.get("/login")
+async def login_page(request: Request):
+    if is_authenticated(request):
+        return RedirectResponse("/", status_code=302)
+    return _templates.TemplateResponse(request, "login.html", context={"error": False})
+
+
+@ui_router.post("/login")
+async def login_submit(
+    request: Request,
+    password: str = Form(...),
+):
+    if check_password(password):
+        import os
+
+        response = RedirectResponse("/", status_code=302)
+        set_session_cookie(response, os.environ.get("DWIGHT_PASSWORD", ""))
+        return response
+    return _templates.TemplateResponse(
+        request, "login.html", context={"error": True}, status_code=401
+    )
+
+
+@ui_router.get("/logout")
+async def logout():
+    response = RedirectResponse("/login", status_code=302)
+    delete_session_cookie(response)
+    return response

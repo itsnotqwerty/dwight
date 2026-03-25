@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Login – Dwight AI{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center mt-5">
+  <div class="col-sm-10 col-md-7 col-lg-5 col-xl-4">
+    <div class="card border-secondary">
+      <div class="card-header fw-semibold text-center">
+        &#x2726; Dwight AI &mdash; Sign in
+      </div>
+      <div class="card-body p-4">
+
+        {% if error %}
+        <div class="alert alert-danger py-2 small mb-3" role="alert">
+          Incorrect password. Please try again.
+        </div>
+        {% endif %}
+
+        <form method="post" action="/login" autocomplete="off">
+          <div class="mb-3">
+            <label for="password" class="form-label">Password</label>
+            <input
+              type="password"
+              id="password"
+              name="password"
+              class="form-control {% if error %}is-invalid{% endif %}"
+              autofocus
+              required>
+          </div>
+          <div class="d-grid">
+            <button type="submit" class="btn btn-primary">Sign in</button>
+          </div>
+        </form>
+
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

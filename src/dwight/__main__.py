@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import click
+from dotenv import load_dotenv
+
+load_dotenv()  # Load .env from the working directory (no-op if absent); env vars take priority.
 
 from dwight.training.dataset import DEFAULT_ARCHIVE
 

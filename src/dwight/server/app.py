@@ -55,7 +55,11 @@ def create_app() -> FastAPI:
     )
     app.include_router(router)
     if os.environ.get("DWIGHT_WEB_UI") == "1":
+        from .auth import _LoginRedirect, login_redirect_response
         from .ui_routes import ui_router
 
+        app.add_exception_handler(
+            _LoginRedirect, lambda req, exc: login_redirect_response()
+        )
         app.include_router(ui_router)
     return app

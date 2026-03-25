@@ -151,7 +151,7 @@ def test_list_models(tiny_model, tokenizer):
     body = resp.json()
     assert body["object"] == "list"
     assert len(body["data"]) >= 1
-    assert body["data"][0]["id"] == "aiml"
+    assert body["data"][0]["id"] == "dwight"
 
 
 # ── API: POST /v1/chat/completions (non-streaming) ───────────────────────────
