@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+{% block title %}Training – Dwight AI{% endblock %}
+{% block nav_train %}active{% endblock %}
+
+{% block content %}
+<div class="row g-4">
+
+  <!-- ── Left: model info cards ───────────────────────────────────────── -->
+  <div class="col-lg-4">
+
+    <!-- Model config -->
+    <div class="card border-secondary mb-3">
+      <div class="card-header fw-semibold">Model configuration</div>
+      <table class="table table-sm table-dark table-borderless mb-0 small">
+        <tbody>
+          {% for key, val in config.items() %}
+          <tr>
+            <td class="text-muted ps-3 py-1">{{ key }}</td>
+            <td class="text-end pe-3 font-monospace">{{ val }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Checkpoint -->
+    <div class="card border-secondary">
+      <div class="card-header fw-semibold">Checkpoint</div>
+      <div class="card-body small">
+        {% if checkpoint.exists %}
+          <div class="mb-1"><span class="text-muted">File:</span> checkpoints/model.pt</div>
+          <div class="mb-1"><span class="text-muted">Size:</span> {{ checkpoint.size_mb }}&nbsp;MB</div>
+          <div class="mb-0"><span class="text-muted">Saved:</span> {{ checkpoint.mtime }}</div>
+        {% else %}
+          <p class="text-warning mb-0">
+            No checkpoint found – model will start with random weights.
+          </p>
+        {% endif %}
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── Right: training controls + live log ──────────────────────────── -->
+  <div class="col-lg-8">
+
+    <!-- Controls card -->
+    <div class="card border-secondary mb-3">
+      <div class="card-header d-flex align-items-center">
+        <span class="fw-semibold">Training</span>
+        <span id="status-badge"
+              class="badge ms-auto {% if is_training %}text-bg-success{% else %}text-bg-secondary{% endif %}">
+          {% if is_training %}Training{% else %}Idle{% endif %}
+        </span>
+      </div>
+      <div class="card-body">
+        <form id="train-form" class="row g-3">
+
+          <div class="col-sm-4">
+            <label class="form-label">Epochs</label>
+            <input type="number" name="epochs" class="form-control form-control-sm"
+                   value="3" min="1">
+          </div>
+
+          <div class="col-sm-4">
+            <label class="form-label">Batch size</label>
+            <input type="number" name="batch_size" class="form-control form-control-sm"
+                   value="8" min="1">
+          </div>
+
+          <div class="col-sm-4">
+            <label class="form-label">Peak LR</label>
+            <input type="number" name="max_lr" class="form-control form-control-sm"
+                   value="0.0003" step="any" min="0">
+          </div>
+
+          <div class="col-sm-4">
+            <label class="form-label">Warmup steps</label>
+            <input type="number" name="warmup_steps" class="form-control form-control-sm"
+                   value="100" min="0">
+          </div>
+
+          <div class="col-sm-4">
+            <label class="form-label">
+              Max steps
+              <small class="text-muted">(optional)</small>
+            </label>
+            <input type="number" name="max_steps" class="form-control form-control-sm"
+                   placeholder="unlimited" min="1">
+          </div>
+
+          <div class="col-sm-4">
+            <label class="form-label">Checkpoint dir</label>
+            <input type="text" name="checkpoint_dir" class="form-control form-control-sm"
+                   value="checkpoints">
+          </div>
+
+          <div class="col-12 d-flex gap-2 pt-1">
+            <button type="submit" id="btn-start" class="btn btn-success"
+                    {% if is_training %}disabled{% endif %}>
+              Start training
+            </button>
+            <button type="button" id="btn-stop" class="btn btn-outline-danger"
+                    {% if not is_training %}disabled{% endif %}>
+              Stop training
+            </button>
+            <span id="action-error" class="text-danger align-self-center small ms-2 d-none"></span>
+          </div>
+
+        </form>
+      </div>
+    </div>
+
+    <!-- Live log -->
+    <div class="card border-secondary">
+      <div class="card-header fw-semibold">Live log</div>
+      <pre id="log-output" class="live-output mb-0 rounded-0 rounded-bottom"></pre>
+    </div>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  'use strict';
+
+  const badge      = document.getElementById('status-badge');
+  const btnStart   = document.getElementById('btn-start');
+  const btnStop    = document.getElementById('btn-stop');
+  const logEl      = document.getElementById('log-output');
+  const form       = document.getElementById('train-form');
+  const errEl      = document.getElementById('action-error');
+
+  let logSrc = null;
+
+  // ── Status helper ──────────────────────────────────────────────────────
+  function setTraining(on) {
+    btnStart.disabled = on;
+    btnStop.disabled  = !on;
+    badge.textContent = on ? 'Training' : 'Idle';
+    badge.className   = on
+      ? 'badge ms-auto text-bg-success'
+      : 'badge ms-auto text-bg-secondary';
+  }
+
+  function showError(msg) {
+    errEl.textContent = msg;
+    errEl.classList.remove('d-none');
+    setTimeout(() => errEl.classList.add('d-none'), 5000);
+  }
+
+  // ── Connect to the log SSE stream ─────────────────────────────────────
+  function connectLogs() {
+    if (logSrc && logSrc.readyState !== EventSource.CLOSED) return;
+    logSrc = new EventSource('/ui/train/logs');
+    logSrc.onmessage = (e) => {
+      const d = JSON.parse(e.data);
+      if (d.type === 'status') {
+        setTraining(d.value === 'training');
+      } else if (d.line !== undefined) {
+        logEl.textContent += d.line + '\n';
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+    };
+    logSrc.onerror = () => {
+      // Reconnect after brief pause (browser will retry automatically,
+      // but we close and reopen for better control).
+      logSrc.close();
+      setTimeout(connectLogs, 3000);
+    };
+  }
+
+  // Connect immediately so the badge reflects live state on page load.
+  connectLogs();
+
+  // ── Start training ─────────────────────────────────────────────────────
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const body = {
+      epochs:         parseInt(fd.get('epochs'),        10),
+      batch_size:     parseInt(fd.get('batch_size'),    10),
+      max_lr:         parseFloat(fd.get('max_lr')),
+      warmup_steps:   parseInt(fd.get('warmup_steps'),  10),
+      checkpoint_dir: fd.get('checkpoint_dir').trim(),
+    };
+    const ms = fd.get('max_steps');
+    if (ms) body.max_steps = parseInt(ms, 10);
+
+    const res    = await fetch('/ui/train/start', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+    });
+    const result = await res.json();
+    if (result.ok) {
+      logEl.textContent = '';
+      setTraining(true);
+      // Reconnect log stream so it picks up the new session immediately.
+      if (logSrc) { logSrc.close(); logSrc = null; }
+      connectLogs();
+    } else {
+      showError(result.error);
+    }
+  });
+
+  // ── Stop training ─────────────────────────────────────────────────────
+  btnStop.addEventListener('click', async () => {
+    const res    = await fetch('/ui/train/stop', { method: 'POST' });
+    const result = await res.json();
+    if (!result.ok) showError(result.error);
+  });
+</script>
+{% endblock %}

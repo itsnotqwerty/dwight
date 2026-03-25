@@ -21,9 +21,18 @@ def cli(ctx: click.Context) -> None:
 @click.option(
     "--reload", is_flag=True, default=False, help="Auto-reload on code changes."
 )
-def serve(host: str, port: int, reload: bool) -> None:
+@click.option(
+    "--web-ui/--no-web-ui", default=False, help="Enable the Jinja2 web UI at / and /train."
+)
+def serve(host: str, port: int, reload: bool, web_ui: bool) -> None:
     """Start the OpenAI-compatible HTTP server."""
+    import os
     import uvicorn
+
+    if web_ui:
+        os.environ["DWIGHT_WEB_UI"] = "1"
+    else:
+        os.environ.pop("DWIGHT_WEB_UI", None)
 
     uvicorn.run(
         "dwight.server.app:create_app",

@@ -22,7 +22,7 @@ from .schemas import (
 
 router = APIRouter()
 
-_MODEL_ID = "aiml"
+_MODEL_ID = "dwight"
 
 
 @router.get("/v1/models")

@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}Generate – Dwight AI{% endblock %}
+{% block nav_generate %}active{% endblock %}
+
+{% block content %}
+<div class="row g-4">
+
+  <!-- ── Left: controls ───────────────────────────────────────────────── -->
+  <div class="col-lg-4">
+    <div class="card border-secondary">
+      <div class="card-header fw-semibold">Generation settings</div>
+      <div class="card-body">
+
+        <div class="mb-3">
+          <label for="prompt" class="form-label">Prompt</label>
+          <textarea id="prompt" class="form-control font-monospace" rows="7"
+                    placeholder="Type a prompt…"></textarea>
+        </div>
+
+        <div class="mb-3">
+          <label for="max-tokens" class="form-label d-flex justify-content-between">
+            Max tokens
+            <span id="max-tokens-val" class="text-muted fw-normal">256</span>
+          </label>
+          <input type="range" id="max-tokens" class="form-range"
+                 min="16" max="1024" step="16" value="256">
+        </div>
+
+        <div class="mb-3">
+          <label for="temperature" class="form-label d-flex justify-content-between">
+            Temperature
+            <span id="temperature-val" class="text-muted fw-normal">1.0</span>
+          </label>
+          <input type="range" id="temperature" class="form-range"
+                 min="0" max="2" step="0.05" value="1.0">
+        </div>
+
+        <div class="mb-4">
+          <label for="top-p" class="form-label d-flex justify-content-between">
+            Top-p
+            <span id="top-p-val" class="text-muted fw-normal">1.0</span>
+          </label>
+          <input type="range" id="top-p" class="form-range"
+                 min="0" max="1" step="0.01" value="1.0">
+        </div>
+
+        <div class="d-flex gap-2">
+          <button id="btn-generate" class="btn btn-primary flex-grow-1">Generate</button>
+          <button id="btn-stop"     class="btn btn-outline-danger" disabled>Stop</button>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Right: output ────────────────────────────────────────────────── -->
+  <div class="col-lg-8 d-flex flex-column">
+    <div class="card border-secondary flex-grow-1 d-flex flex-column">
+      <div class="card-header d-flex align-items-center">
+        <span class="fw-semibold">Output</span>
+        <span id="status-badge" class="badge text-bg-secondary ms-auto">Idle</span>
+      </div>
+      <pre id="output" class="live-output flex-grow-1 mb-0 rounded-0 rounded-bottom"></pre>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  'use strict';
+
+  let evtSource = null;
+
+  const promptEl  = document.getElementById('prompt');
+  const outputEl  = document.getElementById('output');
+  const btnGen    = document.getElementById('btn-generate');
+  const btnStop   = document.getElementById('btn-stop');
+  const badge     = document.getElementById('status-badge');
+
+  // Sync range slider labels
+  [['max-tokens', v => v], ['temperature', v => parseFloat(v).toFixed(2)], ['top-p', v => parseFloat(v).toFixed(2)]].forEach(([id, fmt]) => {
+    const input = document.getElementById(id);
+    const label = document.getElementById(id + '-val');
+    input.addEventListener('input', () => { label.textContent = fmt(input.value); });
+  });
+
+  function setGenerating(on) {
+    btnGen.disabled  = on;
+    btnStop.disabled = !on;
+    badge.textContent = on ? 'Generating…' : 'Idle';
+    badge.className   = on ? 'badge text-bg-warning ms-auto' : 'badge text-bg-secondary ms-auto';
+  }
+
+  function setError() {
+    badge.textContent = 'Error';
+    badge.className   = 'badge text-bg-danger ms-auto';
+  }
+
+  btnGen.addEventListener('click', () => {
+    const prompt = promptEl.value.trim();
+    if (!prompt) { promptEl.focus(); return; }
+
+    outputEl.textContent = '';
+
+    const params = new URLSearchParams({
+      prompt,
+      max_tokens:  document.getElementById('max-tokens').value,
+      temperature: document.getElementById('temperature').value,
+      top_p:       document.getElementById('top-p').value,
+    });
+
+    setGenerating(true);
+
+    evtSource = new EventSource('/ui/generate?' + params.toString());
+
+    evtSource.onmessage = (e) => {
+      const d = JSON.parse(e.data);
+      if (d.done) {
+        evtSource.close();
+        evtSource = null;
+        setGenerating(false);
+      } else if (d.token !== undefined) {
+        outputEl.textContent += d.token;
+        outputEl.scrollTop = outputEl.scrollHeight;
+      }
+    };
+
+    evtSource.onerror = () => {
+      evtSource.close();
+      evtSource = null;
+      setGenerating(false);
+      setError();
+    };
+  });
+
+  btnStop.addEventListener('click', () => {
+    if (evtSource) { evtSource.close(); evtSource = null; }
+    setGenerating(false);
+  });
+</script>
+{% endblock %}

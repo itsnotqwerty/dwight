@@ -36,15 +36,26 @@ async def _lifespan(app: FastAPI):
     model.eval()
     app.state.model = model
     app.state.tokenizer = tokenizer
+    app.state.training_process = None
+    app.state.training_log_lines: list[str] = []  # type: ignore
     yield
-    # Nothing to clean up
+    # Terminate any running training subprocess on shutdown
+    if app.state.training_process is not None:
+        try:
+            app.state.training_process.terminate()
+        except ProcessLookupError:
+            pass
 
 
 def create_app() -> FastAPI:
     """Application factory (used by uvicorn with ``factory=True``)."""
     app = FastAPI(
-        title="AIML – OpenAI-compatible LLM API",
+        title="Dwight – OpenAI-compatible LLM API",
         lifespan=_lifespan,
     )
     app.include_router(router)
+    if os.environ.get("DWIGHT_WEB_UI") == "1":
+        from .ui_routes import ui_router
+
+        app.include_router(ui_router)
     return app

@@ -14,6 +14,7 @@ dependencies = [
     "tiktoken",
     "pydantic>=2",
     "click>=8",
+    "jinja2>=3.0",
     "numpy",
     "tqdm",
     "requests",
