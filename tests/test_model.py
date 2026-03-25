@@ -160,8 +160,8 @@ def test_generate_respects_max_seq_len(tiny_model, tiny_config):
 
 
 def test_default_model_param_count():
-    """Default config should produce ~225M parameters (4× the original 56M)."""
+    """Default config should produce ~148M parameters (weight-tied embeddings)."""
     model = GPTModel(ModelConfig())
     total = sum(p.numel() for p in model.parameters())
-    assert total > 200_000_000, f"Expected >200M params, got {total:,}"
-    assert total < 260_000_000, f"Expected <260M params, got {total:,}"
+    assert total > 130_000_000, f"Expected >130M params, got {total:,}"
+    assert total < 170_000_000, f"Expected <170M params, got {total:,}"

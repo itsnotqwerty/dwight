@@ -6,10 +6,10 @@ class ModelConfig:
     """Hyperparameters for the GPT-style transformer."""
 
     # Architecture
-    num_layers: int = 8
-    d_model: int = 512
-    num_heads: int = 8
-    dff: int = 2048
+    num_layers: int = 10
+    d_model: int = 768
+    num_heads: int = 12
+    dff: int = 3072
     vocab_size: int = 100_277  # tiktoken cl100k_base
     max_seq_len: int = 1024
     dropout: float = 0.1

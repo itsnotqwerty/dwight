@@ -37,7 +37,7 @@ def train(
     epochs: int = 3,
     batch_size: int = 8,
     max_lr: float = 3e-4,
-    warmup_steps: int = 100,
+    warmup_steps: int = 1000,
     checkpoint_dir: str = "checkpoints",
     max_steps: int | None = None,
     data: str = DEFAULT_ARCHIVE,
@@ -59,7 +59,7 @@ def train(
         batch_size=batch_size,
     )
     # The archive is too large to count upfront; use max_steps when known.
-    total_steps = max_steps if max_steps is not None else warmup_steps * 1000
+    total_steps = max_steps if max_steps is not None else warmup_steps * 100
 
     model = GPTModel(config).to(device)
     if device.type == "cuda":
@@ -92,21 +92,32 @@ def train(
 
     if resume and os.path.exists(checkpoint_path):
         ckpt = torch.load(checkpoint_path, weights_only=False, map_location=device)
-        if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
-            model.load_state_dict(ckpt["model_state_dict"])
-            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-            global_step = ckpt.get("global_step", 0)
-            last_ckpt_step = global_step
-            last_ckpt_time = time.monotonic()
-            start_epoch = ckpt.get("completed_epochs", 0) + 1
+        state_dict = (
+            ckpt["model_state_dict"]
+            if isinstance(ckpt, dict) and "model_state_dict" in ckpt
+            else ckpt
+        )
+        try:
+            model.load_state_dict(state_dict, strict=True)
+            if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+                global_step = ckpt.get("global_step", 0)
+                last_ckpt_step = global_step
+                last_ckpt_time = time.monotonic()
+                start_epoch = ckpt.get("completed_epochs", 0) + 1
+                print(
+                    f"Resumed from checkpoint at step {global_step} "
+                    f"(epoch {start_epoch}/{epochs})"
+                )
+            else:
+                print(
+                    "Resumed model weights from legacy checkpoint (step counter reset)."
+                )
+        except RuntimeError as exc:
             print(
-                f"Resumed from checkpoint at step {global_step} "
-                f"(epoch {start_epoch}/{epochs})"
+                f"Warning: checkpoint is incompatible with the current model architecture "
+                f"({exc}). Starting from scratch with fresh weights."
             )
-        else:
-            # Old-format checkpoint: bare state dict — load weights only, reset progress.
-            model.load_state_dict(ckpt)
-            print("Resumed model weights from legacy checkpoint (step counter reset).")
     elif resume:
         print(
             "Warning: --resume requested but no checkpoint found — starting from scratch."

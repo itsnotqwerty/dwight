@@ -31,8 +31,14 @@ async def _lifespan(app: FastAPI):
             if isinstance(ckpt, dict) and "model_state_dict" in ckpt
             else ckpt
         )
-        model.load_state_dict(state_dict)
-        print(f"Loaded weights from {_CHECKPOINT} (device: {device})")
+        try:
+            model.load_state_dict(state_dict)
+            print(f"Loaded weights from {_CHECKPOINT} (device: {device})")
+        except RuntimeError as exc:
+            print(
+                f"Warning: checkpoint {_CHECKPOINT} is incompatible with the current "
+                f"model architecture ({exc}). Starting with random weights."
+            )
     else:
         print(f"No checkpoint found – starting with random weights (device: {device}).")
 

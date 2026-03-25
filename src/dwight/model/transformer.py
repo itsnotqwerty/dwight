@@ -43,6 +43,28 @@ class GPTModel(nn.Module):
             persistent=False,
         )
 
+        self.apply(self._init_weights)
+        # Tie input and output embeddings so they share parameters.
+        self.lm_head.weight = self.token_embedding.weight
+
+    def _init_weights(self, module: nn.Module) -> None:
+        """GPT-2 style weight initialisation with residual-path depth scaling."""
+        if isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        elif isinstance(module, nn.Linear):
+            std = 0.02
+            # Residual projections — scale down by 1/√(2·num_layers) to keep
+            # the residual stream variance constant with depth (GPT-2 §2.3).
+            if module is self.lm_head or any(
+                module is getattr(blk.attn, "out_proj", None)
+                or module is getattr(blk.ffn, "down_proj", None)
+                for blk in self.blocks
+            ):
+                std /= (2 * self.config.num_layers) ** 0.5
+            nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass.
 

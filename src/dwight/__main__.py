@@ -95,7 +95,13 @@ def predict(
             if isinstance(ckpt, dict) and "model_state_dict" in ckpt
             else ckpt
         )
-        model.load_state_dict(state_dict)
+        try:
+            model.load_state_dict(state_dict)
+        except RuntimeError as exc:
+            raise click.ClickException(
+                f"Checkpoint {checkpoint!r} is incompatible with the current model "
+                f"architecture: {exc}. Delete it and retrain from scratch."
+            ) from exc
     else:
         raise click.ClickException(f"Checkpoint not found: {checkpoint}")
 
@@ -127,7 +133,7 @@ def predict(
     "--max-lr", default=3e-4, show_default=True, type=float, help="Peak learning rate."
 )
 @click.option(
-    "--warmup-steps", default=100, show_default=True, type=int, help="LR warmup steps."
+    "--warmup-steps", default=1000, show_default=True, type=int, help="LR warmup steps."
 )
 @click.option(
     "--checkpoint-dir",
