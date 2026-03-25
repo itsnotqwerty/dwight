@@ -30,8 +30,8 @@ class MultiHeadCausalAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
         """Args:
-            x:     (B, T, d_model)
-            freqs: complex tensor (T, head_dim // 2) from precompute_freqs
+        x:     (B, T, d_model)
+        freqs: complex tensor (T, head_dim // 2) from precompute_freqs
         """
         B, T, _ = x.shape
         H, D = self.num_heads, self.head_dim

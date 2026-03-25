@@ -16,7 +16,7 @@ class FeedForwardNetwork(nn.Module):
         super().__init__()
         hidden = 2 * dff // 3
         self.gate_proj = nn.Linear(d_model, hidden, bias=False)
-        self.up_proj   = nn.Linear(d_model, hidden, bias=False)
+        self.up_proj = nn.Linear(d_model, hidden, bias=False)
         self.down_proj = nn.Linear(hidden, d_model, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
