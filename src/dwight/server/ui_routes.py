@@ -114,6 +114,7 @@ class TrainStartRequest(BaseModel):
     checkpoint_dir: str = "checkpoints"
     max_steps: Optional[int] = None
     resume: bool = False
+    grad_accum_steps: int = 1
 
 
 @ui_router.get("/train")
@@ -176,6 +177,8 @@ async def train_start(
         cmd += ["--max-steps", str(body.max_steps)]
     if body.resume:
         cmd.append("--resume")
+    if body.grad_accum_steps > 1:
+        cmd += ["--grad-accum-steps", str(body.grad_accum_steps)]
 
     new_process = await asyncio.create_subprocess_exec(
         *cmd,

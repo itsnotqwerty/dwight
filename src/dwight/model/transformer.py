@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint as _ckpt
 
 from ..config import ModelConfig
 from .rope import precompute_freqs
@@ -17,6 +18,7 @@ class GPTModel(nn.Module):
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.config = config
+        self._gradient_checkpointing = False
 
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_model)
         self.emb_drop = nn.Dropout(config.dropout)
@@ -56,10 +58,17 @@ class GPTModel(nn.Module):
 
         freqs = self.freqs[:T]  # slice to current sequence length
         for block in self.blocks:
-            h = block(h, freqs)
+            if self._gradient_checkpointing and self.training:
+                h = _ckpt(block, h, freqs, use_reentrant=False)
+            else:
+                h = block(h, freqs)
 
         h = self.ln_f(h)
         return self.lm_head(h)  # (B, T, vocab_size)
+
+    def enable_gradient_checkpointing(self) -> None:
+        """Recompute activations during backward to reduce peak VRAM usage."""
+        self._gradient_checkpointing = True
 
     # ------------------------------------------------------------------
     # Autoregressive generation

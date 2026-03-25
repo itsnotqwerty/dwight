@@ -153,6 +153,13 @@ def predict(
     default=False,
     help="Resume training from the last checkpoint in --checkpoint-dir.",
 )
+@click.option(
+    "--grad-accum-steps",
+    default=1,
+    show_default=True,
+    type=int,
+    help="Accumulate gradients over N micro-batches before each optimizer step.",
+)
 def train(
     epochs: int,
     batch_size: int,
@@ -162,6 +169,7 @@ def train(
     max_steps: int | None,
     data: str,
     resume: bool,
+    grad_accum_steps: int,
 ) -> None:
     """Train the transformer on the 4chan /pol/ archive."""
     from dwight.training.train import train as _train
@@ -175,6 +183,7 @@ def train(
         max_steps=max_steps,
         data=data,
         resume=resume,
+        grad_accum_steps=grad_accum_steps,
     )
 
 

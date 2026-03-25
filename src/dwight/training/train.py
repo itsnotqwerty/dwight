@@ -42,8 +42,10 @@ def train(
     max_steps: int | None = None,
     data: str = DEFAULT_ARCHIVE,
     resume: bool = False,
+    grad_accum_steps: int = 1,
 ) -> GPTModel:
     """Train a GPT model on the 4chan /pol/ archive and return the trained model."""
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     config = ModelConfig()
@@ -60,6 +62,8 @@ def train(
     total_steps = max_steps if max_steps is not None else warmup_steps * 1000
 
     model = GPTModel(config).to(device)
+    if device.type == "cuda":
+        model.enable_gradient_checkpointing()
     optimizer = torch.optim.Adam(model.parameters(), lr=max_lr, betas=(0.9, 0.95))
 
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -112,6 +116,9 @@ def train(
         model.train()
         running_loss = 0.0
         n_batches = 0
+        accum_loss = 0.0
+        micro_step = 0
+        optimizer.zero_grad(set_to_none=True)
         pbar = tqdm(loader, desc=f"Epoch {epoch}/{epochs}")
 
         for inp, tgt in pbar:
@@ -121,10 +128,6 @@ def train(
             inp = inp.to(device)
             tgt = tgt.to(device)
 
-            lr = _cosine_decay_lr(global_step, warmup_steps, total_steps, max_lr)
-            for param_group in optimizer.param_groups:
-                param_group["lr"] = lr
-
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                 logits = model(inp)  # (B, T, vocab_size) — bf16, halving peak VRAM
                 loss = F.cross_entropy(
@@ -132,14 +135,25 @@ def train(
                     tgt.view(-1),
                 )
 
-            optimizer.zero_grad()
-            loss.backward()
+            (loss / grad_accum_steps).backward()
+            accum_loss += loss.item()
+            micro_step += 1
+
+            if micro_step % grad_accum_steps != 0:
+                continue
+
+            lr = _cosine_decay_lr(global_step, warmup_steps, total_steps, max_lr)
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = lr
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
 
-            running_loss += loss.item()
+            running_loss += accum_loss / grad_accum_steps
             n_batches += 1
             global_step += 1
+            accum_loss = 0.0
             avg_loss = running_loss / n_batches
             pbar.set_postfix(loss=f"{avg_loss:.4f}", lr=f"{lr:.2e}")
 
@@ -152,6 +166,19 @@ def train(
                 _save_checkpoint(avg_loss, global_step, completed_epochs=epoch - 1)
                 last_ckpt_step = global_step
                 last_ckpt_time = time.monotonic()
+
+        # Flush leftover accumulated gradients if the epoch didn't end on a full accumulation window.
+        if accum_loss > 0.0:
+            remainder = micro_step % grad_accum_steps or grad_accum_steps
+            lr = _cosine_decay_lr(global_step, warmup_steps, total_steps, max_lr)
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = lr
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            running_loss += accum_loss / remainder
+            n_batches += 1
+            global_step += 1
 
         avg_loss = running_loss / max(n_batches, 1)
         _save_checkpoint(avg_loss, global_step, completed_epochs=epoch)
