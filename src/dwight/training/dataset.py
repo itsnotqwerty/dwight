@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader, IterableDataset
 
 from ..tokenizer import TiktokenWrapper
 
-DEFAULT_ARCHIVE = "training-data/4chan-pol/data.tar.zst"
+DEFAULT_ARCHIVE = "data/4chan-pol.tar.zst"
 
 _BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 _TAG_RE = re.compile(r"<[^>]+>")

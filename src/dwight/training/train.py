@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 
 import torch
 import torch.nn.functional as F
@@ -61,8 +62,20 @@ def train(
     optimizer = torch.optim.Adam(model.parameters(), lr=max_lr, betas=(0.9, 0.95))
 
     os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_path = os.path.join(checkpoint_dir, "model.pt")
+    _CHECKPOINT_INTERVAL_SECS = 30 * 60  # 30 minutes
+    _CHECKPOINT_INTERVAL_STEPS = 10_000
+
+    def _save_checkpoint(avg_loss: float, step: int) -> None:
+        model.eval()
+        torch.save(model.state_dict(), checkpoint_path)
+        model.train()
+        print(f"\nCheckpoint saved at step {step} — loss: {avg_loss:.4f}")
 
     global_step = 0
+    last_ckpt_step = 0
+    last_ckpt_time = time.monotonic()
+
     for epoch in range(1, epochs + 1):
         model.train()
         running_loss = 0.0
@@ -97,9 +110,20 @@ def train(
             avg_loss = running_loss / n_batches
             pbar.set_postfix(loss=f"{avg_loss:.4f}", lr=f"{lr:.2e}")
 
-        model.eval()
+            steps_since_ckpt = global_step - last_ckpt_step
+            time_since_ckpt = time.monotonic() - last_ckpt_time
+            if (
+                steps_since_ckpt >= _CHECKPOINT_INTERVAL_STEPS
+                or time_since_ckpt >= _CHECKPOINT_INTERVAL_SECS
+            ):
+                _save_checkpoint(avg_loss, global_step)
+                last_ckpt_step = global_step
+                last_ckpt_time = time.monotonic()
+
         avg_loss = running_loss / max(n_batches, 1)
-        torch.save(model.state_dict(), os.path.join(checkpoint_dir, "model.pt"))
+        _save_checkpoint(avg_loss, global_step)
+        last_ckpt_step = global_step
+        last_ckpt_time = time.monotonic()
         print(f"Epoch {epoch} complete — loss: {avg_loss:.4f}")
 
         if max_steps is not None and global_step >= max_steps:

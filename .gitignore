@@ -1,6 +1,6 @@
 .venv/
 dist/
 checkpoints/*.pt
-training-data/
+data/
 **/*.egg-info/
 **/__pycache__/
