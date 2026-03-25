@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import math
+from unittest.mock import patch
 
-import numpy as np
 import pytest
 
 from dwight.tokenizer import TiktokenWrapper
-from dwight.training.dataset import tokenize_and_batch
+from dwight.training.dataset import chan_dataloader
 from dwight.training.train import _cosine_decay_lr
+
+# Force num_workers=0 so mocks work in-process
+_real_dataloader = __import__("torch.utils.data", fromlist=["DataLoader"]).DataLoader
+
+
+def _inline_dataloader(*args, **kwargs):
+    kwargs["num_workers"] = 0
+    return _real_dataloader(*args, **kwargs)
 
 
 # ── LR schedule ───────────────────────────────────────────────────────────────
@@ -48,32 +56,49 @@ def test_lr_is_monotone_in_warmup():
 
 # ── Dataset creation ──────────────────────────────────────────────────────────
 
+_FAKE_POSTS = ["Hello world! " * 500]
 
-def test_tokenize_and_batch_shapes(tokenizer):
-    text = "Hello world! " * 500  # enough tokens for several windows
-    ds = tokenize_and_batch(text, tokenizer, seq_len=8, batch_size=2)
-    inputs, targets = next(iter(ds))
+
+def test_chan_dataloader_shapes(tokenizer):
+    with (
+        patch(
+            "dwight.training.dataset._iter_post_texts", return_value=iter(_FAKE_POSTS)
+        ),
+        patch("dwight.training.dataset.DataLoader", _inline_dataloader),
+    ):
+        ds = chan_dataloader("fake.tar.zst", tokenizer, seq_len=8, batch_size=2)
+        inputs, targets = next(iter(ds))
     assert inputs.shape[1] == 8
     assert targets.shape[1] == 8
     assert inputs.shape[0] == 2
     assert targets.shape[0] == 2
 
 
-def test_tokenize_and_batch_targets_shifted(tokenizer):
+def test_chan_dataloader_targets_shifted(tokenizer):
     """targets[i] should be inputs[i] shifted left by one token."""
-    text = "abcdefghij " * 200
-    ds = tokenize_and_batch(text, tokenizer, seq_len=16, batch_size=1, shuffle_buffer=1)
-    inp, tgt = next(iter(ds))
+    fake_posts = ["abcdefghij " * 200]
+    with (
+        patch(
+            "dwight.training.dataset._iter_post_texts", return_value=iter(fake_posts)
+        ),
+        patch("dwight.training.dataset.DataLoader", _inline_dataloader),
+    ):
+        ds = chan_dataloader("fake.tar.zst", tokenizer, seq_len=16, batch_size=1)
+        inp, tgt = next(iter(ds))
     inp_np = inp[0].numpy()
     tgt_np = tgt[0].numpy()
-    # The full token sequence is [t0, t1, ..., t17]
-    # inp = [t0..t15], tgt = [t1..t16] – they share 15 elements
     assert inp_np.shape == (16,)
     assert tgt_np.shape == (16,)
 
 
-def test_tokenize_and_batch_returns_dataset(tokenizer):
+def test_chan_dataloader_returns_dataloader(tokenizer):
     from torch.utils.data import DataLoader
 
-    ds = tokenize_and_batch("Hello! " * 300, tokenizer, seq_len=8, batch_size=2)
+    with (
+        patch(
+            "dwight.training.dataset._iter_post_texts", return_value=iter(_FAKE_POSTS)
+        ),
+        patch("dwight.training.dataset.DataLoader", _inline_dataloader),
+    ):
+        ds = chan_dataloader("fake.tar.zst", tokenizer, seq_len=8, batch_size=2)
     assert isinstance(ds, DataLoader)

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import click
 
+from dwight.training.dataset import DEFAULT_ARCHIVE
+
 
 @click.group(invoke_without_command=True)
 @click.pass_context
@@ -123,7 +125,7 @@ def predict(
 )
 @click.option(
     "--data",
-    default="training-data/4chan-pol/data.tar.zst",
+    default=DEFAULT_ARCHIVE,
     show_default=True,
     help="Path to the training archive (.tar.zst).",
 )
