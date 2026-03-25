@@ -120,6 +120,6 @@ def chan_dataloader(
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        num_workers=1,
+        num_workers=2,
         pin_memory=True,
     )

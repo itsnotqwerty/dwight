@@ -25,7 +25,9 @@ def cli(ctx: click.Context) -> None:
     "--reload", is_flag=True, default=False, help="Auto-reload on code changes."
 )
 @click.option(
-    "--web-ui/--no-web-ui", default=False, help="Enable the Jinja2 web UI at / and /train."
+    "--web-ui/--no-web-ui",
+    default=False,
+    help="Enable the Jinja2 web UI at / and /train.",
 )
 def serve(host: str, port: int, reload: bool, web_ui: bool) -> None:
     """Start the OpenAI-compatible HTTP server."""
@@ -87,9 +89,13 @@ def predict(
     model = GPTModel(config)
 
     if os.path.exists(checkpoint):
-        model.load_state_dict(
-            torch.load(checkpoint, weights_only=True, map_location=device)
+        ckpt = torch.load(checkpoint, weights_only=False, map_location=device)
+        state_dict = (
+            ckpt["model_state_dict"]
+            if isinstance(ckpt, dict) and "model_state_dict" in ckpt
+            else ckpt
         )
+        model.load_state_dict(state_dict)
     else:
         raise click.ClickException(f"Checkpoint not found: {checkpoint}")
 
@@ -141,6 +147,12 @@ def predict(
     show_default=True,
     help="Path to the training archive (.tar.zst).",
 )
+@click.option(
+    "--resume",
+    is_flag=True,
+    default=False,
+    help="Resume training from the last checkpoint in --checkpoint-dir.",
+)
 def train(
     epochs: int,
     batch_size: int,
@@ -149,6 +161,7 @@ def train(
     checkpoint_dir: str,
     max_steps: int | None,
     data: str,
+    resume: bool,
 ) -> None:
     """Train the transformer on the 4chan /pol/ archive."""
     from dwight.training.train import train as _train
@@ -161,6 +174,7 @@ def train(
         checkpoint_dir=checkpoint_dir,
         max_steps=max_steps,
         data=data,
+        resume=resume,
     )
 
 

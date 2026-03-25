@@ -7,7 +7,8 @@ import torch
 import torch.nn as nn
 
 from ..config import ModelConfig
-from .transformer_block import TransformerBlock
+from .rope import precompute_freqs
+from .transformer_block import RMSNorm, TransformerBlock
 
 
 class GPTModel(nn.Module):
@@ -18,7 +19,6 @@ class GPTModel(nn.Module):
         self.config = config
 
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_model)
-        self.pos_embedding = nn.Embedding(config.max_seq_len, config.d_model)
         self.emb_drop = nn.Dropout(config.dropout)
 
         self.blocks = nn.ModuleList(
@@ -29,8 +29,17 @@ class GPTModel(nn.Module):
                 for _ in range(config.num_layers)
             ]
         )
-        self.ln_f = nn.LayerNorm(config.d_model, eps=1e-5)
+        self.ln_f = RMSNorm(config.d_model)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+
+        head_dim = config.d_model // config.num_heads
+        # Precomputed RoPE frequencies — registered as a non-parameter buffer so
+        # they travel with the model to GPU and are excluded from optimizer state.
+        self.register_buffer(
+            "freqs",
+            precompute_freqs(head_dim, config.max_seq_len),
+            persistent=False,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass.
@@ -42,15 +51,12 @@ class GPTModel(nn.Module):
             Logits of shape (batch, seq_len, vocab_size).
         """
         B, T = x.shape
-        positions = torch.arange(T, device=x.device)
 
-        tok_emb = self.token_embedding(x)  # (B, T, d_model)
-        pos_emb = self.pos_embedding(positions)  # (T, d_model) – broadcast
+        h = self.emb_drop(self.token_embedding(x))  # (B, T, d_model)
 
-        h = self.emb_drop(tok_emb + pos_emb)
-
+        freqs = self.freqs[:T]  # slice to current sequence length
         for block in self.blocks:
-            h = block(h)
+            h = block(h, freqs)
 
         h = self.ln_f(h)
         return self.lm_head(h)  # (B, T, vocab_size)

@@ -7,12 +7,12 @@ from dwight.config import ModelConfig
 
 def test_default_values():
     cfg = ModelConfig()
-    assert cfg.num_layers == 6
-    assert cfg.d_model == 256
-    assert cfg.num_heads == 8
-    assert cfg.dff == 1024
+    assert cfg.num_layers == 10
+    assert cfg.d_model == 768
+    assert cfg.num_heads == 12
+    assert cfg.dff == 3072
     assert cfg.vocab_size == 100_277
-    assert cfg.max_seq_len == 512
+    assert cfg.max_seq_len == 1024
     assert cfg.dropout == 0.1
 
 

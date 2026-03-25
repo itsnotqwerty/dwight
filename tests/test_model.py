@@ -9,6 +9,7 @@ import torch
 from dwight.config import ModelConfig
 from dwight.model.attention import MultiHeadCausalAttention
 from dwight.model.feed_forward import FeedForwardNetwork
+from dwight.model.rope import precompute_freqs
 from dwight.model.transformer import GPTModel
 from dwight.model.transformer_block import TransformerBlock
 
@@ -16,6 +17,7 @@ from dwight.model.transformer_block import TransformerBlock
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 BATCH, SEQ, D_MODEL, HEADS, DFF = 2, 8, 32, 2, 64
+HEAD_DIM = D_MODEL // HEADS  # 16
 
 
 def _float_input(batch=BATCH, seq=SEQ, d_model=D_MODEL):
@@ -26,13 +28,18 @@ def _token_input(batch=BATCH, seq=SEQ, vocab=100_277):
     return torch.randint(0, vocab, size=(batch, seq))
 
 
+def _freqs(seq=SEQ):
+    """Precomputed RoPE frequencies for the test head_dim, sliced to *seq*."""
+    return precompute_freqs(HEAD_DIM, max(seq, SEQ))[:seq]
+
+
 # ── MultiHeadCausalAttention ──────────────────────────────────────────────────
 
 
 def test_attention_output_shape():
     layer = MultiHeadCausalAttention(d_model=D_MODEL, num_heads=HEADS)
     x = _float_input()
-    out = layer(x)
+    out = layer(x, _freqs())
     assert out.shape == (BATCH, SEQ, D_MODEL)
 
 
@@ -45,7 +52,7 @@ def test_attention_causal_mask_applied():
     """
     layer = MultiHeadCausalAttention(d_model=D_MODEL, num_heads=HEADS, dropout=0.0)
     x = torch.zeros(1, 4, D_MODEL)
-    out = layer(x).detach().numpy()  # (1, 4, D_MODEL)
+    out = layer(x, _freqs(4)).detach().numpy()  # (1, 4, D_MODEL)
     # With all-zero input all positions are identical, just verify shapes don't crash
     assert out.shape == (1, 4, D_MODEL)
 
@@ -53,7 +60,7 @@ def test_attention_causal_mask_applied():
 def test_attention_different_seq_lengths():
     layer = MultiHeadCausalAttention(d_model=D_MODEL, num_heads=HEADS)
     for seq in (1, 3, 16):
-        out = layer(_float_input(seq=seq))
+        out = layer(_float_input(seq=seq), _freqs(seq))
         assert out.shape == (BATCH, seq, D_MODEL)
 
 
@@ -80,7 +87,7 @@ def test_ffn_preserves_dtype():
 def test_block_output_shape():
     block = TransformerBlock(d_model=D_MODEL, num_heads=HEADS, dff=DFF)
     x = _float_input()
-    out = block(x)
+    out = block(x, _freqs())
     assert out.shape == (BATCH, SEQ, D_MODEL)
 
 
@@ -88,7 +95,7 @@ def test_block_residual_connection():
     """Output should not equal input (weights are random, so the FFN adds info)."""
     block = TransformerBlock(d_model=D_MODEL, num_heads=HEADS, dff=DFF, dropout=0.0)
     x = _float_input()
-    out = block(x).detach().numpy()
+    out = block(x, _freqs()).detach().numpy()
     assert not np.allclose(out, x.numpy(), atol=1e-4)
 
 
@@ -147,3 +154,14 @@ def test_generate_respects_max_seq_len(tiny_model, tiny_config):
     long_prompt = list(range(tiny_config.max_seq_len + 10))
     tokens = list(tiny_model.generate(long_prompt, max_new_tokens=2))
     assert len(tokens) == 2
+
+
+# ── Parameter count ───────────────────────────────────────────────────────────
+
+
+def test_default_model_param_count():
+    """Default config should produce ~225M parameters (4× the original 56M)."""
+    model = GPTModel(ModelConfig())
+    total = sum(p.numel() for p in model.parameters())
+    assert total > 200_000_000, f"Expected >200M params, got {total:,}"
+    assert total < 260_000_000, f"Expected <260M params, got {total:,}"

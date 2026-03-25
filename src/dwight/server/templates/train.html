@@ -95,6 +95,19 @@
                    value="checkpoints">
           </div>
 
+          <div class="col-12">
+            <div class="form-check">
+              <input class="form-check-input" type="checkbox" name="resume" id="resume-checkbox"
+                     value="1" {% if not checkpoint.exists %}disabled{% endif %}>
+              <label class="form-check-label" for="resume-checkbox">
+                Resume from checkpoint
+                {% if not checkpoint.exists %}
+                  <small class="text-muted">(no checkpoint found)</small>
+                {% endif %}
+              </label>
+            </div>
+          </div>
+
           <div class="col-12 d-flex gap-2 pt-1">
             <button type="submit" id="btn-start" class="btn btn-success"
                     {% if is_training %}disabled{% endif %}>
@@ -187,6 +200,7 @@
     };
     const ms = fd.get('max_steps');
     if (ms) body.max_steps = parseInt(ms, 10);
+    body.resume = fd.get('resume') === '1';
 
     const res    = await fetch('/ui/train/start', {
       method:  'POST',

@@ -1,14 +1,14 @@
-"""Multi-head causal self-attention layer."""
-
-import math
+"""Multi-head causal self-attention with RoPE and Flash-Attention (SDPA)."""
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .rope import apply_rope
+
 
 class MultiHeadCausalAttention(nn.Module):
-    """Scaled dot-product attention with a causal (autoregressive) mask."""
+    """Causal self-attention using RoPE positional encoding and SDPA."""
 
     def __init__(
         self,
@@ -21,44 +21,36 @@ class MultiHeadCausalAttention(nn.Module):
         self.d_model = d_model
         self.num_heads = num_heads
         self.head_dim = d_model // num_heads
-        self.scale = math.sqrt(self.head_dim)
+        self.dropout = dropout
 
         self.q_proj = nn.Linear(d_model, d_model, bias=False)
         self.k_proj = nn.Linear(d_model, d_model, bias=False)
         self.v_proj = nn.Linear(d_model, d_model, bias=False)
         self.out_proj = nn.Linear(d_model, d_model, bias=False)
-        self.attn_drop = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+        """Args:
+            x:     (B, T, d_model)
+            freqs: complex tensor (T, head_dim // 2) from precompute_freqs
+        """
         B, T, _ = x.shape
         H, D = self.num_heads, self.head_dim
 
-        q = self.q_proj(x)  # (B, T, d_model)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
+        q = self.q_proj(x).view(B, T, H, D).transpose(1, 2)  # (B, H, T, D)
+        k = self.k_proj(x).view(B, T, H, D).transpose(1, 2)
+        v = self.v_proj(x).view(B, T, H, D).transpose(1, 2)
 
-        # Split into heads: (B, T, d_model) -> (B, H, T, D)
-        q = q.view(B, T, H, D).transpose(1, 2)
-        k = k.view(B, T, H, D).transpose(1, 2)
-        v = v.view(B, T, H, D).transpose(1, 2)
+        # Apply rotary embeddings to Q and K
+        q = apply_rope(q, freqs)
+        k = apply_rope(k, freqs)
 
-        # Attention scores (B, H, T, T)
-        scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale
-
-        # Additive causal mask: upper triangle = -1e9
-        causal_bias = (
-            torch.triu(
-                torch.ones(T, T, device=x.device, dtype=torch.float32), diagonal=1
-            )
-            * -1e9
-        )
-        scores = scores + causal_bias  # broadcast over batch and heads
-
-        weights = F.softmax(scores, dim=-1)
-        weights = self.attn_drop(weights)
+        # Flash-Attention-compatible causal SDPA (uses FlashAttention on CUDA)
+        attn_dropout = self.dropout if self.training else 0.0
+        out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, dropout_p=attn_dropout, is_causal=True
+        )  # (B, H, T, D)
 
         # Merge heads: (B, H, T, D) -> (B, T, d_model)
-        out = torch.matmul(weights, v)
         out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
 
         return self.out_proj(out)

@@ -25,9 +25,13 @@ async def _lifespan(app: FastAPI):
     model = GPTModel(config)
 
     if os.path.exists(_CHECKPOINT):
-        model.load_state_dict(
-            torch.load(_CHECKPOINT, weights_only=True, map_location=device)
+        ckpt = torch.load(_CHECKPOINT, weights_only=False, map_location=device)
+        state_dict = (
+            ckpt["model_state_dict"]
+            if isinstance(ckpt, dict) and "model_state_dict" in ckpt
+            else ckpt
         )
+        model.load_state_dict(state_dict)
         print(f"Loaded weights from {_CHECKPOINT} (device: {device})")
     else:
         print(f"No checkpoint found – starting with random weights (device: {device}).")

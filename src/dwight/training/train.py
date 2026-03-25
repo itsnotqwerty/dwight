@@ -41,6 +41,7 @@ def train(
     checkpoint_dir: str = "checkpoints",
     max_steps: int | None = None,
     data: str = DEFAULT_ARCHIVE,
+    resume: bool = False,
 ) -> GPTModel:
     """Train a GPT model on the 4chan /pol/ archive and return the trained model."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -66,17 +67,48 @@ def train(
     _CHECKPOINT_INTERVAL_SECS = 30 * 60  # 30 minutes
     _CHECKPOINT_INTERVAL_STEPS = 10_000
 
-    def _save_checkpoint(avg_loss: float, step: int) -> None:
+    def _save_checkpoint(avg_loss: float, step: int, completed_epochs: int) -> None:
         model.eval()
-        torch.save(model.state_dict(), checkpoint_path)
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "global_step": step,
+                "completed_epochs": completed_epochs,
+            },
+            checkpoint_path,
+        )
         model.train()
         print(f"\nCheckpoint saved at step {step} — loss: {avg_loss:.4f}")
 
     global_step = 0
     last_ckpt_step = 0
     last_ckpt_time = time.monotonic()
+    start_epoch = 1
 
-    for epoch in range(1, epochs + 1):
+    if resume and os.path.exists(checkpoint_path):
+        ckpt = torch.load(checkpoint_path, weights_only=False, map_location=device)
+        if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+            model.load_state_dict(ckpt["model_state_dict"])
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            global_step = ckpt.get("global_step", 0)
+            last_ckpt_step = global_step
+            last_ckpt_time = time.monotonic()
+            start_epoch = ckpt.get("completed_epochs", 0) + 1
+            print(
+                f"Resumed from checkpoint at step {global_step} "
+                f"(epoch {start_epoch}/{epochs})"
+            )
+        else:
+            # Old-format checkpoint: bare state dict — load weights only, reset progress.
+            model.load_state_dict(ckpt)
+            print("Resumed model weights from legacy checkpoint (step counter reset).")
+    elif resume:
+        print(
+            "Warning: --resume requested but no checkpoint found — starting from scratch."
+        )
+
+    for epoch in range(start_epoch, epochs + 1):
         model.train()
         running_loss = 0.0
         n_batches = 0
@@ -93,11 +125,12 @@ def train(
             for param_group in optimizer.param_groups:
                 param_group["lr"] = lr
 
-            logits = model(inp)  # (B, T, vocab_size)
-            loss = F.cross_entropy(
-                logits.view(-1, config.vocab_size),
-                tgt.view(-1),
-            )
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                logits = model(inp)  # (B, T, vocab_size) — bf16, halving peak VRAM
+                loss = F.cross_entropy(
+                    logits.view(-1, config.vocab_size),
+                    tgt.view(-1),
+                )
 
             optimizer.zero_grad()
             loss.backward()
@@ -116,12 +149,12 @@ def train(
                 steps_since_ckpt >= _CHECKPOINT_INTERVAL_STEPS
                 or time_since_ckpt >= _CHECKPOINT_INTERVAL_SECS
             ):
-                _save_checkpoint(avg_loss, global_step)
+                _save_checkpoint(avg_loss, global_step, completed_epochs=epoch - 1)
                 last_ckpt_step = global_step
                 last_ckpt_time = time.monotonic()
 
         avg_loss = running_loss / max(n_batches, 1)
-        _save_checkpoint(avg_loss, global_step)
+        _save_checkpoint(avg_loss, global_step, completed_epochs=epoch)
         last_ckpt_step = global_step
         last_ckpt_time = time.monotonic()
         print(f"Epoch {epoch} complete — loss: {avg_loss:.4f}")

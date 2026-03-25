@@ -113,6 +113,7 @@ class TrainStartRequest(BaseModel):
     warmup_steps: int = 100
     checkpoint_dir: str = "checkpoints"
     max_steps: Optional[int] = None
+    resume: bool = False
 
 
 @ui_router.get("/train")
@@ -146,7 +147,9 @@ async def train_page(request: Request, _: None = Depends(require_auth)):
 
 
 @ui_router.post("/ui/train/start")
-async def train_start(body: TrainStartRequest, request: Request, _: None = Depends(require_auth)):
+async def train_start(
+    body: TrainStartRequest, request: Request, _: None = Depends(require_auth)
+):
     app = request.app
     process = app.state.training_process
     if process is not None and process.returncode is None:
@@ -171,6 +174,8 @@ async def train_start(body: TrainStartRequest, request: Request, _: None = Depen
     ]
     if body.max_steps is not None:
         cmd += ["--max-steps", str(body.max_steps)]
+    if body.resume:
+        cmd.append("--resume")
 
     new_process = await asyncio.create_subprocess_exec(
         *cmd,
