@@ -6,15 +6,17 @@ import asyncio
 import datetime
 import json
 import sys
+import threading
 from dataclasses import fields
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
+import torch
 from fastapi import APIRouter, Depends, Form
 from fastapi.requests import Request
 from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .auth import (
     check_password,
@@ -268,6 +270,254 @@ async def train_logs_sse(request: Request, _: None = Depends(require_auth)):
     return StreamingResponse(
         event_stream(), media_type="text/event-stream", headers=_SSE_HEADERS
     )
+
+
+# ---------------------------------------------------------------------------
+# Fine-tuning UI  (/tune)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_CORPUS = "data/corpus.md"
+
+
+class TuneStartRequest(BaseModel):
+    corpus_path: str = _DEFAULT_CORPUS
+    epochs: int = 1
+    batch_size: int = 1
+    lr: float = 1e-4
+    max_steps: Optional[int] = None
+
+
+class RlhfRoundRequest(BaseModel):
+    prompt: str
+    max_tokens: int = Field(default=128, ge=1, le=512)
+    temperature: float = Field(default=1.0, ge=0.0, le=2.0)
+    top_p: float = Field(default=0.9, ge=0.0, le=1.0)
+    n: int = Field(default=3, ge=1, le=5)
+
+
+class RlhfRateRequest(BaseModel):
+    ratings: List[int]  # +1 (thumbs-up) or -1 (thumbs-down) per completion
+
+
+@ui_router.get("/tune")
+async def tune_page(request: Request, _: None = Depends(require_auth)):
+    from ..config import ModelConfig
+
+    checkpoint_path = Path("checkpoints") / "model.pt"
+    checkpoint_info: dict = {"exists": checkpoint_path.exists()}
+    if checkpoint_info["exists"]:
+        stat = checkpoint_path.stat()
+        checkpoint_info["size_mb"] = round(stat.st_size / 1_048_576, 1)
+        checkpoint_info["mtime"] = datetime.datetime.fromtimestamp(
+            stat.st_mtime
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+    app = request.app
+    thread = app.state.finetune_thread
+    is_sft_running = thread is not None and thread.is_alive()
+
+    return _templates.TemplateResponse(
+        request,
+        "tune.html",
+        context={
+            "checkpoint": checkpoint_info,
+            "is_sft_running": is_sft_running,
+            "finetune_status": app.state.finetune_status,
+            "default_corpus": _DEFAULT_CORPUS,
+        },
+    )
+
+
+@ui_router.post("/ui/tune/sft/start")
+async def tune_sft_start(
+    body: TuneStartRequest, request: Request, _: None = Depends(require_auth)
+):
+    app = request.app
+    thread = app.state.finetune_thread
+    if thread is not None and thread.is_alive():
+        return {"ok": False, "error": "Fine-tuning is already in progress."}
+
+    corpus = Path(body.corpus_path)
+    if not corpus.exists():
+        return {"ok": False, "error": f"Corpus file not found: {body.corpus_path}"}
+
+    # Fresh stop event for this run
+    stop_event = threading.Event()
+    app.state.finetune_stop_event = stop_event
+    app.state.finetune_log_lines.clear()
+    app.state.finetune_status = "sft"
+
+    model = app.state.model
+    tokenizer = app.state.tokenizer
+
+    from ..config import ModelConfig
+    from ..training.finetune import sft_finetune
+
+    config = ModelConfig()
+
+    def run():
+        try:
+            sft_finetune(
+                model,
+                tokenizer,
+                config,
+                corpus_path=body.corpus_path,
+                epochs=body.epochs,
+                batch_size=body.batch_size,
+                lr=body.lr,
+                max_steps=body.max_steps,
+                stop_event=stop_event,
+                log_fn=lambda line: app.state.finetune_log_lines.append(line),
+            )
+        except Exception as exc:
+            app.state.finetune_log_lines.append(f"[SFT] Error: {exc}")
+        finally:
+            app.state.finetune_status = "idle"
+
+    t = threading.Thread(target=run, daemon=True, name="sft-finetune")
+    app.state.finetune_thread = t
+    t.start()
+    return {"ok": True}
+
+
+@ui_router.post("/ui/tune/sft/stop")
+async def tune_sft_stop(request: Request, _: None = Depends(require_auth)):
+    app = request.app
+    thread = app.state.finetune_thread
+    if thread is None or not thread.is_alive():
+        return {"ok": False, "error": "No fine-tuning is running."}
+    app.state.finetune_stop_event.set()
+    return {"ok": True}
+
+
+@ui_router.get("/ui/tune/logs")
+async def tune_logs_sse(request: Request, _: None = Depends(require_auth)):
+    async def event_stream():
+        last_status: Optional[str] = None
+        lines: list[str] = request.app.state.finetune_log_lines
+        offset = max(0, len(lines) - 50)
+
+        while True:
+            if await request.is_disconnected():
+                break
+
+            lines = request.app.state.finetune_log_lines
+            while offset < len(lines):
+                yield f"data: {json.dumps({'line': lines[offset].rstrip()})}\n\n"
+                offset += 1
+
+            status = request.app.state.finetune_status
+            if status != last_status:
+                yield f"data: {json.dumps({'type': 'status', 'value': status})}\n\n"
+                last_status = status
+
+            yield ": keepalive\n\n"
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        event_stream(), media_type="text/event-stream", headers=_SSE_HEADERS
+    )
+
+
+@ui_router.post("/ui/tune/rlhf/generate")
+async def tune_rlhf_generate(
+    body: RlhfRoundRequest, request: Request, _: None = Depends(require_auth)
+):
+    app = request.app
+    thread = app.state.finetune_thread
+    if thread is not None and thread.is_alive():
+        return {
+            "ok": False,
+            "error": "SFT is running — wait for it to finish before starting an RLHF round.",
+        }
+
+    model = app.state.model
+    tokenizer = app.state.tokenizer
+
+    loop = asyncio.get_running_loop()
+
+    def _generate_one() -> str:
+        return "".join(
+            generate_tokens(
+                model,
+                tokenizer,
+                body.prompt,
+                max_tokens=body.max_tokens,
+                temperature=body.temperature,
+                top_p=body.top_p,
+            )
+        )
+
+    completions: list[str] = []
+    for _ in range(body.n):
+        text = await loop.run_in_executor(None, _generate_one)
+        completions.append(text)
+
+    app.state.rlhf_pending = {
+        "prompt": body.prompt,
+        "completions": completions,
+    }
+
+    return {"ok": True, "prompt": body.prompt, "completions": completions}
+
+
+@ui_router.post("/ui/tune/rlhf/rate")
+async def tune_rlhf_rate(
+    body: RlhfRateRequest, request: Request, _: None = Depends(require_auth)
+):
+    app = request.app
+    pending = app.state.rlhf_pending
+    if pending is None:
+        return {
+            "ok": False,
+            "error": "No pending RLHF round. Generate completions first.",
+        }
+
+    completions = pending["completions"]
+    prompt = pending["prompt"]
+
+    if len(body.ratings) != len(completions):
+        return {
+            "ok": False,
+            "error": f"Expected {len(completions)} ratings, got {len(body.ratings)}.",
+        }
+
+    for r in body.ratings:
+        if r not in (-1, 0, 1):
+            return {"ok": False, "error": "Each rating must be -1, 0, or +1."}
+
+    model = app.state.model
+    tokenizer = app.state.tokenizer
+
+    # Lazy-initialise RLHF optimizer (tiny lr to avoid catastrophic forgetting)
+    if app.state.rlhf_optimizer is None:
+        app.state.rlhf_optimizer = torch.optim.Adam(
+            model.parameters(), lr=1e-5, betas=(0.9, 0.95)
+        )
+
+    optimizer = app.state.rlhf_optimizer
+
+    from ..config import ModelConfig
+    from ..training.finetune import rlhf_step
+
+    config = ModelConfig()
+
+    loop = asyncio.get_running_loop()
+
+    def _run_step():
+        return rlhf_step(
+            model,
+            optimizer,
+            tokenizer,
+            config,
+            prompt=prompt,
+            completions=completions,
+            rewards=[float(r) for r in body.ratings],
+        )
+
+    loss = await loop.run_in_executor(None, _run_step)
+    app.state.rlhf_pending = None  # round consumed
+    return {"ok": True, "loss": round(loss, 6)}
 
 
 # ---------------------------------------------------------------------------

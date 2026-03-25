@@ -1,0 +1,386 @@
+{% extends "base.html" %}
+{% block title %}Fine-tuning – Dwight AI{% endblock %}
+{% block nav_models %}active{% endblock %}
+
+{% block content %}
+<div class="row g-4">
+
+  <!-- ── Left: SFT settings + checkpoint ─────────────────────────────── -->
+  <div class="col-lg-4">
+
+    <!-- Checkpoint -->
+    <div class="card border-secondary mb-3">
+      <div class="card-header fw-semibold">Checkpoint</div>
+      <div class="card-body small">
+        {% if checkpoint.exists %}
+          <div class="mb-1"><span class="text-muted">File:</span> checkpoints/model.pt</div>
+          <div class="mb-1"><span class="text-muted">Size:</span> {{ checkpoint.size_mb }}&nbsp;MB</div>
+          <div class="mb-0"><span class="text-muted">Saved:</span> {{ checkpoint.mtime }}</div>
+        {% else %}
+          <p class="text-warning mb-0">No checkpoint found – model uses random weights.</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- SFT settings -->
+    <div class="card border-secondary">
+      <div class="card-header d-flex align-items-center">
+        <span class="fw-semibold">Supervised Fine-tuning</span>
+        <span id="sft-badge"
+              class="badge ms-auto {% if is_sft_running %}text-bg-success{% else %}text-bg-secondary{% endif %}">
+          {% if is_sft_running %}Running{% else %}Idle{% endif %}
+        </span>
+      </div>
+      <div class="card-body">
+        <form id="sft-form" class="row g-2">
+
+          <div class="col-12">
+            <label class="form-label">Corpus file</label>
+            <input type="text" name="corpus_path" class="form-control form-control-sm font-monospace"
+                   value="{{ default_corpus }}">
+          </div>
+
+          <div class="col-6">
+            <label class="form-label">Epochs</label>
+            <input type="number" name="epochs" class="form-control form-control-sm" value="1" min="1">
+          </div>
+
+          <div class="col-6">
+            <label class="form-label">Batch size</label>
+            <input type="number" name="batch_size" class="form-control form-control-sm" value="1" min="1">
+          </div>
+
+          <div class="col-6">
+            <label class="form-label">Learning rate</label>
+            <input type="number" name="lr" class="form-control form-control-sm"
+                   value="0.0001" step="any" min="0">
+          </div>
+
+          <div class="col-6">
+            <label class="form-label">Max steps <small class="text-muted">(opt.)</small></label>
+            <input type="number" name="max_steps" class="form-control form-control-sm"
+                   placeholder="∞" min="1">
+          </div>
+
+          <div class="col-12 d-flex gap-2 pt-1">
+            <button type="submit" id="btn-sft-start" class="btn btn-sm btn-success"
+                    {% if is_sft_running %}disabled{% endif %}>
+              Start SFT
+            </button>
+            <button type="button" id="btn-sft-stop" class="btn btn-sm btn-outline-danger"
+                    {% if not is_sft_running %}disabled{% endif %}>
+              Stop
+            </button>
+          </div>
+
+          <div class="col-12">
+            <span id="sft-error" class="text-danger small d-none"></span>
+          </div>
+
+        </form>
+      </div>
+    </div>
+
+  </div><!-- /left col -->
+
+  <!-- ── Right: log + RLHF ────────────────────────────────────────────── -->
+  <div class="col-lg-8">
+
+    <!-- SFT live log -->
+    <div class="card border-secondary mb-4">
+      <div class="card-header fw-semibold">SFT log</div>
+      <pre id="sft-log" class="live-output mb-0 rounded-0 rounded-bottom"></pre>
+    </div>
+
+    <!-- RLHF card -->
+    <div class="card border-secondary">
+      <div class="card-header fw-semibold d-flex align-items-center gap-2">
+        RLHF loop
+        <span class="badge text-bg-info">REINFORCE + baseline</span>
+        <span id="rlhf-sft-warning" class="text-warning small ms-auto d-none">
+          ⚠ SFT is running – wait before generating
+        </span>
+      </div>
+      <div class="card-body">
+
+        <!-- Prompt + generation params -->
+        <div class="row g-2 mb-3">
+          <div class="col-12">
+            <label class="form-label fw-semibold">Prompt</label>
+            <textarea id="rlhf-prompt" class="form-control form-control-sm font-monospace"
+                      rows="3" placeholder="Enter a prompt…"></textarea>
+          </div>
+          <div class="col-4">
+            <label class="form-label">Max tokens</label>
+            <input type="number" id="rlhf-max-tokens" class="form-control form-control-sm"
+                   value="128" min="1" max="512">
+          </div>
+          <div class="col-4">
+            <label class="form-label">Temperature</label>
+            <input type="number" id="rlhf-temp" class="form-control form-control-sm"
+                   value="1.0" step="0.1" min="0" max="2">
+          </div>
+          <div class="col-4">
+            <label class="form-label">Top-p</label>
+            <input type="number" id="rlhf-top-p" class="form-control form-control-sm"
+                   value="0.9" step="0.05" min="0" max="1">
+          </div>
+          <div class="col-12 d-flex align-items-center gap-2">
+            <button id="btn-generate" class="btn btn-sm btn-primary">
+              Generate completions
+            </button>
+            <span id="gen-spinner" class="spinner-border spinner-border-sm text-primary d-none" role="status"></span>
+            <span id="gen-error" class="text-danger small d-none"></span>
+          </div>
+        </div>
+
+        <!-- Completion cards (filled by JS) -->
+        <div id="completions-area" class="d-none">
+          <p class="text-muted small mb-2">
+            Rate each completion, then click <strong>Submit ratings</strong> to update the policy.
+          </p>
+          <div id="completion-cards" class="vstack gap-3 mb-3"></div>
+          <div class="d-flex align-items-center gap-3">
+            <button id="btn-rate" class="btn btn-sm btn-warning">Submit ratings</button>
+            <span id="rate-spinner" class="spinner-border spinner-border-sm text-warning d-none" role="status"></span>
+            <span id="rate-result" class="small d-none"></span>
+            <span id="rate-error" class="text-danger small d-none"></span>
+          </div>
+        </div>
+
+      </div><!-- /card-body -->
+    </div><!-- /rlhf card -->
+
+  </div><!-- /right col -->
+</div><!-- /row -->
+{% endblock %}
+
+{% block scripts %}
+<script>
+  'use strict';
+
+  // ── SFT controls ──────────────────────────────────────────────────────────
+  const sftBadge   = document.getElementById('sft-badge');
+  const btnSftStart = document.getElementById('btn-sft-start');
+  const btnSftStop  = document.getElementById('btn-sft-stop');
+  const sftLog      = document.getElementById('sft-log');
+  const sftErrEl    = document.getElementById('sft-error');
+  const rlhfWarn    = document.getElementById('rlhf-sft-warning');
+  let logSrc = null;
+
+  function setSftRunning(on) {
+    btnSftStart.disabled = on;
+    btnSftStop.disabled  = !on;
+    sftBadge.textContent = on ? 'Running' : 'Idle';
+    sftBadge.className   = on
+      ? 'badge ms-auto text-bg-success'
+      : 'badge ms-auto text-bg-secondary';
+    rlhfWarn.classList.toggle('d-none', !on);
+    document.getElementById('btn-generate').disabled = on;
+  }
+
+  function showSftError(msg) {
+    sftErrEl.textContent = msg;
+    sftErrEl.classList.remove('d-none');
+    setTimeout(() => sftErrEl.classList.add('d-none'), 6000);
+  }
+
+  function connectSftLogs() {
+    if (logSrc && logSrc.readyState !== EventSource.CLOSED) return;
+    logSrc = new EventSource('/ui/tune/logs');
+    logSrc.onmessage = (e) => {
+      const d = JSON.parse(e.data);
+      if (d.type === 'status') {
+        setSftRunning(d.value === 'sft');
+      } else if (d.line !== undefined) {
+        sftLog.textContent += d.line + '\n';
+        sftLog.scrollTop = sftLog.scrollHeight;
+      }
+    };
+    logSrc.onerror = () => {
+      logSrc.close();
+      setTimeout(connectSftLogs, 3000);
+    };
+  }
+
+  connectSftLogs();
+
+  document.getElementById('sft-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const body = {
+      corpus_path: fd.get('corpus_path').trim(),
+      epochs:      parseInt(fd.get('epochs'), 10),
+      batch_size:  parseInt(fd.get('batch_size'), 10),
+      lr:          parseFloat(fd.get('lr')),
+    };
+    const ms = fd.get('max_steps');
+    if (ms) body.max_steps = parseInt(ms, 10);
+
+    const res = await fetch('/ui/tune/sft/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const result = await res.json();
+    if (result.ok) {
+      sftLog.textContent = '';
+      setSftRunning(true);
+      if (logSrc) { logSrc.close(); logSrc = null; }
+      connectSftLogs();
+    } else {
+      showSftError(result.error);
+    }
+  });
+
+  btnSftStop.addEventListener('click', async () => {
+    const res    = await fetch('/ui/tune/sft/stop', { method: 'POST' });
+    const result = await res.json();
+    if (!result.ok) showSftError(result.error);
+  });
+
+  // ── RLHF controls ─────────────────────────────────────────────────────────
+  const btnGenerate       = document.getElementById('btn-generate');
+  const genSpinner        = document.getElementById('gen-spinner');
+  const genErrEl          = document.getElementById('gen-error');
+  const completionsArea   = document.getElementById('completions-area');
+  const completionCards   = document.getElementById('completion-cards');
+  const btnRate           = document.getElementById('btn-rate');
+  const rateSpinner       = document.getElementById('rate-spinner');
+  const rateResultEl      = document.getElementById('rate-result');
+  const rateErrEl         = document.getElementById('rate-error');
+
+  let currentCompletions = [];
+
+  function showGenError(msg) {
+    genErrEl.textContent = msg;
+    genErrEl.classList.remove('d-none');
+    setTimeout(() => genErrEl.classList.add('d-none'), 6000);
+  }
+
+  function showRateError(msg) {
+    rateErrEl.textContent = msg;
+    rateErrEl.classList.remove('d-none');
+    setTimeout(() => rateErrEl.classList.add('d-none'), 6000);
+  }
+
+  btnGenerate.addEventListener('click', async () => {
+    const prompt = document.getElementById('rlhf-prompt').value.trim();
+    if (!prompt) { showGenError('Please enter a prompt.'); return; }
+
+    btnGenerate.disabled = true;
+    genSpinner.classList.remove('d-none');
+    genErrEl.classList.add('d-none');
+    completionsArea.classList.add('d-none');
+    completionCards.innerHTML = '';
+
+    const body = {
+      prompt,
+      max_tokens:  parseInt(document.getElementById('rlhf-max-tokens').value, 10),
+      temperature: parseFloat(document.getElementById('rlhf-temp').value),
+      top_p:       parseFloat(document.getElementById('rlhf-top-p').value),
+      n: 3,
+    };
+
+    try {
+      const res = await fetch('/ui/tune/rlhf/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+
+      if (!data.ok) {
+        showGenError(data.error);
+        return;
+      }
+
+      currentCompletions = data.completions;
+      renderCompletionCards(data.completions);
+      completionsArea.classList.remove('d-none');
+      rateResultEl.classList.add('d-none');
+      rateErrEl.classList.add('d-none');
+    } catch (err) {
+      showGenError('Network error: ' + err.message);
+    } finally {
+      btnGenerate.disabled = false;
+      genSpinner.classList.add('d-none');
+    }
+  });
+
+  function renderCompletionCards(completions) {
+    completionCards.innerHTML = '';
+    completions.forEach((text, i) => {
+      const card = document.createElement('div');
+      card.className = 'card border-secondary bg-dark';
+      card.innerHTML = `
+        <div class="card-header d-flex align-items-center gap-2 py-2">
+          <span class="fw-semibold small text-muted">Completion ${i + 1}</span>
+          <div class="btn-group ms-auto" role="group">
+            <input type="radio" class="btn-check" name="rating-${i}"
+                   id="up-${i}" value="1" autocomplete="off">
+            <label class="btn btn-sm btn-outline-success" for="up-${i}" title="Thumbs up">👍</label>
+
+            <input type="radio" class="btn-check" name="rating-${i}"
+                   id="skip-${i}" value="0" autocomplete="off" checked>
+            <label class="btn btn-sm btn-outline-secondary" for="skip-${i}" title="Neutral">—</label>
+
+            <input type="radio" class="btn-check" name="rating-${i}"
+                   id="down-${i}" value="-1" autocomplete="off">
+            <label class="btn btn-sm btn-outline-danger" for="down-${i}" title="Thumbs down">👎</label>
+          </div>
+        </div>
+        <div class="card-body py-2">
+          <pre class="mb-0 small text-light" style="white-space:pre-wrap;word-break:break-word">${escapeHtml(text)}</pre>
+        </div>`;
+      completionCards.appendChild(card);
+    });
+  }
+
+  function escapeHtml(str) {
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  btnRate.addEventListener('click', async () => {
+    if (currentCompletions.length === 0) { showRateError('Generate completions first.'); return; }
+
+    const ratings = currentCompletions.map((_, i) => {
+      const checked = document.querySelector(`input[name="rating-${i}"]:checked`);
+      return checked ? parseInt(checked.value, 10) : 0;
+    });
+
+    btnRate.disabled = true;
+    rateSpinner.classList.remove('d-none');
+    rateResultEl.classList.add('d-none');
+    rateErrEl.classList.add('d-none');
+
+    try {
+      const res = await fetch('/ui/tune/rlhf/rate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ratings }),
+      });
+      const data = await res.json();
+
+      if (!data.ok) {
+        showRateError(data.error);
+        return;
+      }
+
+      rateResultEl.textContent = `Policy updated ✓  loss = ${data.loss}`;
+      rateResultEl.className = 'small text-success';
+      rateResultEl.classList.remove('d-none');
+      currentCompletions = [];   // round consumed
+    } catch (err) {
+      showRateError('Network error: ' + err.message);
+    } finally {
+      btnRate.disabled = false;
+      rateSpinner.classList.add('d-none');
+    }
+  });
+</script>
+{% endblock %}

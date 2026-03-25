@@ -123,3 +123,55 @@ def chan_dataloader(
         num_workers=2,
         pin_memory=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Plain-text corpus dataset (for fine-tuning on corpus.md or similar files)
+# ---------------------------------------------------------------------------
+
+DEFAULT_CORPUS = "data/corpus.md"
+
+
+class CorpusDataset(IterableDataset):
+    """``IterableDataset`` over a plain-text or Markdown file.
+
+    The file is read once, tokenized into a flat sequence, and then sliced
+    into ``(input_ids, target_ids)`` pairs of length *seq_len* using the same
+    rolling-window approach as ``ChanDataset``.
+    """
+
+    def __init__(
+        self,
+        corpus_path: str | Path,
+        tokenizer: TiktokenWrapper,
+        seq_len: int = 512,
+    ) -> None:
+        self.corpus_path = Path(corpus_path)
+        self.tokenizer = tokenizer
+        self.seq_len = seq_len
+
+    def __iter__(self):
+        text = self.corpus_path.read_text(encoding="utf-8", errors="replace")
+        tokens = self.tokenizer.encode(text)
+        chunk = self.seq_len + 1
+        for start in range(0, len(tokens) - chunk + 1, self.seq_len):
+            seq = tokens[start : start + chunk]
+            inp = torch.tensor(seq[:-1], dtype=torch.long)
+            tgt = torch.tensor(seq[1:], dtype=torch.long)
+            yield inp, tgt
+
+
+def corpus_dataloader(
+    corpus_path: str | Path,
+    tokenizer: TiktokenWrapper,
+    seq_len: int = 512,
+    batch_size: int = 4,
+) -> DataLoader:
+    """Return a ``DataLoader`` over a plain-text corpus file."""
+    dataset = CorpusDataset(corpus_path, tokenizer, seq_len)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=0,  # single-file read; no benefit from multiple workers
+        pin_memory=True,
+    )

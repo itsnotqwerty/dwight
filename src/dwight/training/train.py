@@ -16,6 +16,13 @@ from ..tokenizer import TiktokenWrapper
 from .dataset import DEFAULT_ARCHIVE, chan_dataloader
 
 
+def _autocast_kwargs(device: torch.device) -> dict:
+    if device.type != "cuda":
+        return {"enabled": False}
+    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    return {"enabled": True, "dtype": dtype}
+
+
 def _cosine_decay_lr(
     step: int,
     warmup_steps: int,
@@ -48,8 +55,12 @@ def train(
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    if device.type == "cuda":
+        amp_dtype = "bfloat16" if torch.cuda.is_bf16_supported() else "float16"
+        print(f"AMP enabled on CUDA ({amp_dtype})")
     config = ModelConfig()
     tokenizer = TiktokenWrapper()
+    autocast_kwargs = _autocast_kwargs(device)
 
     print(f"Streaming dataset from {data} …")
     loader = chan_dataloader(
@@ -136,15 +147,24 @@ def train(
             if max_steps is not None and global_step >= max_steps:
                 break
 
-            inp = inp.to(device)
-            tgt = tgt.to(device)
+            try:
+                inp = inp.to(device)
+                tgt = tgt.to(device)
 
-            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-                logits = model(inp)  # (B, T, vocab_size) — bf16, halving peak VRAM
-                loss = F.cross_entropy(
-                    logits.view(-1, config.vocab_size),
-                    tgt.view(-1),
-                )
+                with torch.autocast(device_type=device.type, **autocast_kwargs):
+                    logits = model(inp)
+                    loss = F.cross_entropy(
+                        logits.view(-1, config.vocab_size),
+                        tgt.view(-1),
+                    )
+            except RuntimeError as exc:
+                if device.type == "cuda" and "cuda out of memory" in str(exc).lower():
+                    torch.cuda.empty_cache()
+                    raise RuntimeError(
+                        "CUDA OOM during training. Try --batch-size 1 and increase "
+                        "--grad-accum-steps, or reduce max_seq_len in ModelConfig."
+                    ) from exc
+                raise
 
             (loss / grad_accum_steps).backward()
             accum_loss += loss.item()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 
 import numpy as np
 import torch
@@ -19,6 +20,7 @@ _CHECKPOINT = os.path.join("checkpoints", "model.pt")
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = ModelConfig()
     tokenizer = TiktokenWrapper()
@@ -48,6 +50,13 @@ async def _lifespan(app: FastAPI):
     app.state.tokenizer = tokenizer
     app.state.training_process = None
     app.state.training_log_lines: list[str] = []  # type: ignore
+    # Fine-tuning (in-process, background thread)
+    app.state.finetune_thread: threading.Thread | None = None  # type: ignore
+    app.state.finetune_log_lines: list[str] = []  # type: ignore
+    app.state.finetune_status: str = "idle"  # type: ignore
+    app.state.finetune_stop_event: threading.Event = threading.Event()  # type: ignore
+    app.state.rlhf_optimizer = None  # lazy Adam; created on first RLHF step
+    app.state.rlhf_pending: dict | None = None  # holds current round prompt+completions
     yield
     # Terminate any running training subprocess on shutdown
     if app.state.training_process is not None:
@@ -55,6 +64,10 @@ async def _lifespan(app: FastAPI):
             app.state.training_process.terminate()
         except ProcessLookupError:
             pass
+    # Signal any running SFT thread to stop
+    app.state.finetune_stop_event.set()
+    if app.state.finetune_thread is not None and app.state.finetune_thread.is_alive():
+        app.state.finetune_thread.join(timeout=5)
 
 
 def create_app() -> FastAPI:
