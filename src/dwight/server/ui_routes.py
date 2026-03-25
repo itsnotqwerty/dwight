@@ -51,7 +51,9 @@ async def generate_sse(
     interrupted = [False]
 
     def _run() -> None:
-        for t in generate_tokens(model, tokenizer, prompt, max_tokens, temperature, top_p):
+        for t in generate_tokens(
+            model, tokenizer, prompt, max_tokens, temperature, top_p
+        ):
             if interrupted[0]:
                 break
             tokens.append(t)
@@ -85,7 +87,9 @@ async def generate_sse(
             offset += 1
         yield f"data: {json.dumps({'done': True})}\n\n"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
+    return StreamingResponse(
+        event_stream(), media_type="text/event-stream", headers=_SSE_HEADERS
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -114,9 +118,9 @@ async def train_page(request: Request):
     if checkpoint_info["exists"]:
         stat = checkpoint_path.stat()
         checkpoint_info["size_mb"] = round(stat.st_size / 1_048_576, 1)
-        checkpoint_info["mtime"] = datetime.datetime.fromtimestamp(stat.st_mtime).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+        checkpoint_info["mtime"] = datetime.datetime.fromtimestamp(
+            stat.st_mtime
+        ).strftime("%Y-%m-%d %H:%M:%S")
 
     process = request.app.state.training_process
     is_training = process is not None and process.returncode is None
@@ -183,30 +187,51 @@ async def train_stop(request: Request):
 
 
 async def _stream_training_output(app) -> None:
-    """Background task: read subprocess stdout and append to log_lines."""
+    """Background task: read subprocess stdout and append to log_lines.
+
+    tqdm uses ``\\r`` (not ``\\n``) to overwrite progress lines, so we read
+    raw chunks and split on both ``\\r`` and ``\\n`` so that every progress
+    update is forwarded to the UI.
+    """
     process = app.state.training_process
+    buf = b""
     try:
         while True:
-            line = await process.stdout.readline()
-            if not line:
+            chunk = await process.stdout.read(256)
+            if not chunk:
                 break
-            app.state.training_log_lines.append(line.decode(errors="replace"))
+            buf += chunk
+            # Normalise CR-only and CRLF to LF, then split into lines.
+            parts = buf.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
+            buf = parts[-1]  # last element may be an incomplete line
+            for part in parts[:-1]:
+                decoded = part.decode(errors="replace")
+                if decoded:
+                    app.state.training_log_lines.append(decoded)
     finally:
+        # Flush any data left in the buffer after the pipe closes.
+        if buf:
+            decoded = buf.decode(errors="replace")
+            if decoded:
+                app.state.training_log_lines.append(decoded)
         await process.wait()
 
 
 @ui_router.get("/ui/train/logs")
 async def train_logs_sse(request: Request):
     async def event_stream():
-        offset = 0
         last_status: Optional[str] = None
+
+        # Start from the tail of existing history (at most 50 lines).
+        lines: list[str] = request.app.state.training_log_lines
+        offset = max(0, len(lines) - 50)
 
         while True:
             if await request.is_disconnected():
                 break
 
             # Send any new log lines
-            lines: list[str] = request.app.state.training_log_lines
+            lines = request.app.state.training_log_lines
             while offset < len(lines):
                 yield f"data: {json.dumps({'line': lines[offset].rstrip()})}\n\n"
                 offset += 1
@@ -223,4 +248,6 @@ async def train_logs_sse(request: Request):
             yield ": keepalive\n\n"
             await asyncio.sleep(0.5)
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
+    return StreamingResponse(
+        event_stream(), media_type="text/event-stream", headers=_SSE_HEADERS
+    )
