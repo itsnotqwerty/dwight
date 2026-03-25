@@ -1,0 +1,6 @@
+.venv/
+dist/
+checkpoints/*.pt
+training-data/
+**/*.egg-info/
+**/__pycache__/
