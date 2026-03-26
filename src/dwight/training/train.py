@@ -84,9 +84,7 @@ def _min_training_seq_len(config: object) -> int:
     )
 
 
-def _training_uses_gradient_checkpointing(
-    config: object, device: torch.device
-) -> bool:
+def _training_uses_gradient_checkpointing(config: object, device: torch.device) -> bool:
     if device.type != "cuda":
         return False
     return bool(getattr(config, "train_gradient_checkpointing", True))

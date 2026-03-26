@@ -136,7 +136,9 @@ def test_tiny_model_offloads_auxiliary_state_to_cpu(tiny_arch_model):
     tiny_arch_model.reset_ema()
     tiny_arch_model.record_swa_snapshot()
     tiny_arch_model.offload_auxiliary_state_to_cpu()
-    assert all(tensor.device.type == "cpu" for tensor in tiny_arch_model.ema_shadow.values())
+    assert all(
+        tensor.device.type == "cpu" for tensor in tiny_arch_model.ema_shadow.values()
+    )
     assert all(
         tensor.device.type == "cpu"
         for snapshot in tiny_arch_model._swa_snapshots

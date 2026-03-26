@@ -112,14 +112,10 @@ class TinyModel(nn.Module):
 
     def offload_auxiliary_state_to_cpu(self) -> None:
         self.ema_shadow = {
-            name: _cpu_clone_tensor(shadow)
-            for name, shadow in self.ema_shadow.items()
+            name: _cpu_clone_tensor(shadow) for name, shadow in self.ema_shadow.items()
         }
         self._swa_snapshots = [
-            {
-                name: _cpu_clone_tensor(tensor)
-                for name, tensor in snapshot.items()
-            }
+            {name: _cpu_clone_tensor(tensor) for name, tensor in snapshot.items()}
             for snapshot in self._swa_snapshots
         ]
 
