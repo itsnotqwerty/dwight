@@ -69,9 +69,9 @@ def _checkpoint_info(app) -> dict:
     if checkpoint_info["exists"]:
         stat = checkpoint_path.stat()
         checkpoint_info["size_mb"] = round(stat.st_size / 1_048_576, 1)
-        checkpoint_info["mtime"] = datetime.datetime.fromtimestamp(stat.st_mtime).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+        checkpoint_info["mtime"] = datetime.datetime.fromtimestamp(
+            stat.st_mtime
+        ).strftime("%Y-%m-%d %H:%M:%S")
     return checkpoint_info
 
 
@@ -220,9 +220,16 @@ async def select_model(
 
     thread = getattr(app.state, "finetune_thread", None)
     if thread is not None and thread.is_alive():
-        return {"ok": False, "error": "Cannot switch models while fine-tuning is running."}
+        return {
+            "ok": False,
+            "error": "Cannot switch models while fine-tuning is running.",
+        }
 
-    device = getattr(app.state, "device", torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+    device = getattr(
+        app.state,
+        "device",
+        torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    )
     current_model = getattr(app.state, "model", None)
     if current_model is not None:
         current_model.to("cpu")

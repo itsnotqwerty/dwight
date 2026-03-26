@@ -143,7 +143,10 @@ def predict(
     "--epochs", default=3, show_default=True, type=int, help="Training epochs."
 )
 @click.option(
-    "--batch-size", default=8, show_default=True, type=int, help="Batch size."
+    "--batch-size",
+    default=None,
+    type=int,
+    help="Batch size. Defaults to the selected model's training config.",
 )
 @click.option(
     "--max-lr", default=3e-4, show_default=True, type=float, help="Peak learning rate."
@@ -177,10 +180,9 @@ def predict(
 )
 @click.option(
     "--grad-accum-steps",
-    default=1,
-    show_default=True,
+    default=None,
     type=int,
-    help="Accumulate gradients over N micro-batches before each optimizer step.",
+    help="Accumulate gradients over N micro-batches before each optimizer step. Defaults to the selected model's training config.",
 )
 @click.option(
     "--model",
@@ -192,14 +194,14 @@ def predict(
 )
 def train(
     epochs: int,
-    batch_size: int,
+    batch_size: int | None,
     max_lr: float,
     warmup_steps: int,
     checkpoint_dir: str,
     max_steps: int | None,
     data: str,
     resume: bool,
-    grad_accum_steps: int,
+    grad_accum_steps: int | None,
     model_id: str,
 ) -> None:
     """Train the transformer on the 4chan /pol/ archive."""

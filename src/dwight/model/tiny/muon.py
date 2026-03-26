@@ -5,11 +5,15 @@ from dataclasses import dataclass
 import torch
 
 
-def newton_schulz5(matrix: torch.Tensor, steps: int = 5, eps: float = 1e-6) -> torch.Tensor:
+def newton_schulz5(
+    matrix: torch.Tensor, steps: int = 5, eps: float = 1e-6
+) -> torch.Tensor:
     """Approximate inverse square-root using a short Newton-Schulz iteration."""
     if matrix.ndim == 2:
         matrix = matrix.unsqueeze(0)
-    identity = torch.eye(matrix.shape[-1], device=matrix.device, dtype=matrix.dtype).expand(matrix.shape[0], -1, -1)
+    identity = torch.eye(
+        matrix.shape[-1], device=matrix.device, dtype=matrix.dtype
+    ).expand(matrix.shape[0], -1, -1)
     norm = matrix.norm(dim=(-2, -1), keepdim=True).clamp_min(eps)
     y = matrix / norm
     z = identity.clone()
@@ -55,10 +59,22 @@ class ParallelMuon:
         scalar_weight_decay: float,
     ) -> None:
         named_params = list(model.named_parameters())
-        matrix_params = [param for _, param in named_params if param.ndim >= 2 and param.requires_grad]
-        embed_params = [param for name, param in named_params if "token_embedding" in name and param.requires_grad]
+        matrix_params = [
+            param
+            for _, param in named_params
+            if param.ndim >= 2 and param.requires_grad
+        ]
+        embed_params = [
+            param
+            for name, param in named_params
+            if "token_embedding" in name and param.requires_grad
+        ]
         embed_ids = {id(param) for param in embed_params}
-        scalar_params = [param for _, param in named_params if param.requires_grad and id(param) not in embed_ids and param.ndim < 2]
+        scalar_params = [
+            param
+            for _, param in named_params
+            if param.requires_grad and id(param) not in embed_ids and param.ndim < 2
+        ]
 
         matrix_only = [param for param in matrix_params if id(param) not in embed_ids]
         self.matrix_optimizer = torch.optim.SGD(
@@ -68,14 +84,28 @@ class ParallelMuon:
             weight_decay=matrix_weight_decay,
         )
         self.scalar_optimizer = torch.optim.AdamW(
-            [
-                {"params": scalar_params, "lr": scalar_lr, "weight_decay": scalar_weight_decay},
-                {"params": embed_params, "lr": tied_embed_lr, "weight_decay": scalar_weight_decay},
-            ] if scalar_params or embed_params else [],
+            (
+                [
+                    {
+                        "params": scalar_params,
+                        "lr": scalar_lr,
+                        "weight_decay": scalar_weight_decay,
+                    },
+                    {
+                        "params": embed_params,
+                        "lr": tied_embed_lr,
+                        "weight_decay": scalar_weight_decay,
+                    },
+                ]
+                if scalar_params or embed_params
+                else []
+            ),
             lr=scalar_lr,
             betas=(0.9, 0.95),
         )
-        self.param_groups = self.matrix_optimizer.param_groups + self.scalar_optimizer.param_groups
+        self.param_groups = (
+            self.matrix_optimizer.param_groups + self.scalar_optimizer.param_groups
+        )
         self.bank = ParameterBank(parameters=matrix_only)
 
     def zero_grad(self, set_to_none: bool = True) -> None:

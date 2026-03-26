@@ -17,7 +17,9 @@ def quantize_int6(tensor: torch.Tensor, group_size: int = 128) -> dict:
         min_val = float(chunk.min())
         max_val = float(chunk.max())
         scale = (max_val - min_val) / 63.0 if max_val != min_val else 1.0
-        quantized = torch.clamp(torch.round((chunk - min_val) / scale), 0, 63).to(torch.uint8)
+        quantized = torch.clamp(torch.round((chunk - min_val) / scale), 0, 63).to(
+            torch.uint8
+        )
         groups.append(quantized)
         scales.append(scale)
         zeros.append(min_val)
@@ -31,7 +33,11 @@ def quantize_int6(tensor: torch.Tensor, group_size: int = 128) -> dict:
 
 
 def save_compressed(model: torch.nn.Module, path: str) -> None:
-    payload = {name: quantize_int6(param) for name, param in model.state_dict().items() if torch.is_tensor(param)}
+    payload = {
+        name: quantize_int6(param)
+        for name, param in model.state_dict().items()
+        if torch.is_tensor(param)
+    }
     raw = io.BytesIO()
     torch.save(payload, raw)
     with lzma.open(path, "wb") as handle:

@@ -19,6 +19,7 @@ class TinyModelConfig:
     min_train_seq_len: int = 256
     train_batch_size: int = 1
     train_grad_accum_steps: int = 8
+    train_gradient_checkpointing: bool = False
     dropout: float = 0.0
     rope_dims: int = 16
     xsa_last_n: int = 4
@@ -47,11 +48,21 @@ class TinyModelConfig:
     def __post_init__(self) -> None:
         head_dim = self.d_model // self.num_heads
         assert self.d_model % self.num_heads == 0, "d_model must divide num_heads"
-        assert self.num_heads % self.num_kv_heads == 0, "num_heads must divide num_kv_heads"
+        assert (
+            self.num_heads % self.num_kv_heads == 0
+        ), "num_heads must divide num_kv_heads"
         assert self.rope_dims % 2 == 0, "rope_dims must be even"
         assert self.rope_dims <= head_dim, "rope_dims must fit within head_dim"
-        assert 0 <= self.xsa_last_n <= self.num_layers, "xsa_last_n must be within layer count"
-        assert 1 <= self.train_seq_len <= self.max_seq_len, "train_seq_len must be within max_seq_len"
-        assert 1 <= self.min_train_seq_len <= self.train_seq_len, "min_train_seq_len must be within train_seq_len"
+        assert (
+            0 <= self.xsa_last_n <= self.num_layers
+        ), "xsa_last_n must be within layer count"
+        assert (
+            1 <= self.train_seq_len <= self.max_seq_len
+        ), "train_seq_len must be within max_seq_len"
+        assert (
+            1 <= self.min_train_seq_len <= self.train_seq_len
+        ), "min_train_seq_len must be within train_seq_len"
         assert self.train_batch_size >= 1, "train_batch_size must be positive"
-        assert self.train_grad_accum_steps >= 1, "train_grad_accum_steps must be positive"
+        assert (
+            self.train_grad_accum_steps >= 1
+        ), "train_grad_accum_steps must be positive"

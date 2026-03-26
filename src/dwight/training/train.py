@@ -56,12 +56,40 @@ def _maybe_record_swa_snapshot(model: torch.nn.Module) -> None:
         record_snapshot()
 
 
+def _maybe_offload_auxiliary_state(model: torch.nn.Module) -> None:
+    offload_auxiliary_state = getattr(model, "offload_auxiliary_state_to_cpu", None)
+    if callable(offload_auxiliary_state):
+        offload_auxiliary_state()
+
+
 def _training_seq_len(config: object) -> int:
     return int(getattr(config, "train_seq_len", getattr(config, "max_seq_len")))
 
 
+def _training_batch_size(config: object, batch_size: int | None) -> int:
+    if batch_size is not None:
+        return batch_size
+    return int(getattr(config, "train_batch_size", 8))
+
+
+def _training_grad_accum_steps(config: object, grad_accum_steps: int | None) -> int:
+    if grad_accum_steps is not None:
+        return grad_accum_steps
+    return int(getattr(config, "train_grad_accum_steps", 1))
+
+
 def _min_training_seq_len(config: object) -> int:
-    return int(getattr(config, "min_train_seq_len", min(128, _training_seq_len(config))))
+    return int(
+        getattr(config, "min_train_seq_len", min(128, _training_seq_len(config)))
+    )
+
+
+def _training_uses_gradient_checkpointing(
+    config: object, device: torch.device
+) -> bool:
+    if device.type != "cuda":
+        return False
+    return bool(getattr(config, "train_gradient_checkpointing", True))
 
 
 def _is_cuda_oom(exc: BaseException) -> bool:
@@ -72,14 +100,14 @@ def _is_cuda_oom(exc: BaseException) -> bool:
 
 def train(
     epochs: int = 3,
-    batch_size: int = 8,
+    batch_size: int | None = None,
     max_lr: float = 3e-4,
     warmup_steps: int = 1000,
     checkpoint_dir: str = "checkpoints",
     max_steps: int | None = None,
     data: str = DEFAULT_ARCHIVE,
     resume: bool = False,
-    grad_accum_steps: int = 1,
+    grad_accum_steps: int | None = None,
     model_id: str = "dwight",
 ) -> torch.nn.Module:
     """Train a GPT model on the 4chan /pol/ archive and return the trained model."""
@@ -93,20 +121,22 @@ def train(
     autocast_kwargs = _autocast_kwargs(device)
     entry = get_model_entry(model_id)
     config = entry.config_cls()
-    current_batch_size = batch_size
+    current_batch_size = _training_batch_size(config, batch_size)
     current_seq_len = _training_seq_len(config)
     min_seq_len = _min_training_seq_len(config)
+    grad_accum_steps = _training_grad_accum_steps(config, grad_accum_steps)
+    uses_gradient_checkpointing = _training_uses_gradient_checkpointing(config, device)
 
     print(f"Streaming dataset from {data} …")
     print(
         f"Training runtime: seq_len={current_seq_len}, batch_size={current_batch_size}, "
-        f"grad_accum_steps={grad_accum_steps}"
+        f"grad_accum_steps={grad_accum_steps}, gradient_checkpointing={uses_gradient_checkpointing}"
     )
     # The archive is too large to count upfront; use max_steps when known.
     total_steps = max_steps if max_steps is not None else warmup_steps * 100
 
     model = cast(GPTModel | TinyModel, entry.model_cls(config).to(device))
-    if device.type == "cuda":
+    if uses_gradient_checkpointing:
         model.enable_gradient_checkpointing()
     if model_id == "tiny":
         assert isinstance(config, TinyModelConfig)
@@ -123,7 +153,9 @@ def train(
         optimizer = torch.optim.Adam(model.parameters(), lr=max_lr, betas=(0.9, 0.95))
 
     os.makedirs(checkpoint_dir, exist_ok=True)
-    checkpoint_path = os.path.join(checkpoint_dir, os.path.basename(entry.checkpoint_path))
+    checkpoint_path = os.path.join(
+        checkpoint_dir, os.path.basename(entry.checkpoint_path)
+    )
     _CHECKPOINT_INTERVAL_SECS = 30 * 60  # 30 minutes
     _CHECKPOINT_INTERVAL_STEPS = 10_000
 
@@ -220,7 +252,9 @@ def train(
                     if micro_step % grad_accum_steps != 0:
                         continue
 
-                    lr = _cosine_decay_lr(global_step, warmup_steps, total_steps, max_lr)
+                    lr = _cosine_decay_lr(
+                        global_step, warmup_steps, total_steps, max_lr
+                    )
                     for param_group in optimizer.param_groups:
                         param_group["lr"] = lr
 
@@ -245,13 +279,16 @@ def train(
                         steps_since_ckpt >= _CHECKPOINT_INTERVAL_STEPS
                         or time_since_ckpt >= _CHECKPOINT_INTERVAL_SECS
                     ):
-                        _save_checkpoint(avg_loss, global_step, completed_epochs=epoch - 1)
+                        _save_checkpoint(
+                            avg_loss, global_step, completed_epochs=epoch - 1
+                        )
                         last_ckpt_step = global_step
                         last_ckpt_time = time.monotonic()
                 except RuntimeError as exc:
                     if device.type != "cuda" or not _is_cuda_oom(exc):
                         raise
                     optimizer.zero_grad(set_to_none=True)
+                    _maybe_offload_auxiliary_state(model)
                     torch.cuda.empty_cache()
                     if current_batch_size > 1:
                         new_batch_size = max(1, current_batch_size // 2)
@@ -280,7 +317,9 @@ def train(
             if accum_loss > 0.0:
                 try:
                     remainder = micro_step % grad_accum_steps or grad_accum_steps
-                    lr = _cosine_decay_lr(global_step, warmup_steps, total_steps, max_lr)
+                    lr = _cosine_decay_lr(
+                        global_step, warmup_steps, total_steps, max_lr
+                    )
                     for param_group in optimizer.param_groups:
                         param_group["lr"] = lr
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)

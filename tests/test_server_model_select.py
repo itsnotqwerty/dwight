@@ -43,7 +43,9 @@ def test_train_page_shows_active_model_config(tiny_config, tokenizer):
     assert 'value="8"' in response.text
 
 
-def test_model_select_switches_to_tiny(monkeypatch, tokenizer, tiny_config, tiny_arch_config):
+def test_model_select_switches_to_tiny(
+    monkeypatch, tokenizer, tiny_config, tiny_arch_config
+):
     import dwight.server.ui_routes as ui_routes_module
 
     client = _make_ui_client(GPTModel(tiny_config).eval(), tokenizer, tiny_config)

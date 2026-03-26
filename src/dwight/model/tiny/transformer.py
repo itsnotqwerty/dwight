@@ -12,6 +12,10 @@ from .transformer_block import TinyTransformerBlock
 from .vocab_embed import FactoredVocabEmbed
 
 
+def _cpu_clone_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor.detach().to(device="cpu", copy=True)
+
+
 class TinyModel(nn.Module):
     """Separate tiny model with grouped-query attention and bigram features."""
 
@@ -70,7 +74,7 @@ class TinyModel(nn.Module):
 
     def reset_ema(self) -> None:
         self.ema_shadow = {
-            name: parameter.detach().clone()
+            name: _cpu_clone_tensor(parameter)
             for name, parameter in self.named_parameters()
         }
 
@@ -78,8 +82,9 @@ class TinyModel(nn.Module):
         synced: dict[str, torch.Tensor] = {}
         for name, parameter in self.named_parameters():
             shadow = self.ema_shadow.get(name)
-            if shadow is None or shadow.device != parameter.device or shadow.dtype != parameter.dtype:
-                shadow = parameter.detach().clone()
+            parameter_cpu = parameter.detach().to(device="cpu")
+            if shadow is None or shadow.dtype != parameter_cpu.dtype:
+                shadow = parameter_cpu.clone()
             synced[name] = shadow
         self.ema_shadow = synced
 
@@ -91,36 +96,72 @@ class TinyModel(nn.Module):
         self._sync_ema_shadow()
         for name, parameter in self.named_parameters():
             shadow = self.ema_shadow[name]
+            parameter_cpu = parameter.detach().to(device="cpu")
             shadow.mul_(self.config.ema_decay)
-            shadow.add_(parameter.detach(), alpha=1.0 - self.config.ema_decay)
+            shadow.add_(parameter_cpu, alpha=1.0 - self.config.ema_decay)
 
     def record_swa_snapshot(self) -> None:
         if not self.config.swa_enabled:
             return
-        self._swa_snapshots.append({
-            name: tensor.detach().clone() for name, tensor in self.state_dict().items()
-        })
+        self._swa_snapshots.append(
+            {
+                name: _cpu_clone_tensor(tensor)
+                for name, tensor in self.state_dict().items()
+            }
+        )
+
+    def offload_auxiliary_state_to_cpu(self) -> None:
+        self.ema_shadow = {
+            name: _cpu_clone_tensor(shadow)
+            for name, shadow in self.ema_shadow.items()
+        }
+        self._swa_snapshots = [
+            {
+                name: _cpu_clone_tensor(tensor)
+                for name, tensor in snapshot.items()
+            }
+            for snapshot in self._swa_snapshots
+        ]
 
     def set_training_progress(self, progress: float) -> None:
-        self.quantization_enabled = bool(self.config.late_qat and progress >= self.config.late_qat_threshold)
+        self.quantization_enabled = bool(
+            self.config.late_qat and progress >= self.config.late_qat_threshold
+        )
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         _, seq_len = tokens.shape
         x = self.token_embedding(tokens) + self.bigram_embedding(tokens)
         x = self.emb_drop(x)
-        vocab_residual = self.vocab_residual(tokens) if self.vocab_residual is not None else None
-        shared_index = self.config.num_layers - self.config.xsa_last_n if self.config.xsa_last_n else None
+        vocab_residual = (
+            self.vocab_residual(tokens) if self.vocab_residual is not None else None
+        )
+        shared_index = (
+            self.config.num_layers - self.config.xsa_last_n
+            if self.config.xsa_last_n
+            else None
+        )
         shared_kv = None
         for index, block in enumerate(self.blocks):
-            block_vocab_residual = vocab_residual if vocab_residual is not None and index in self.ve_layers else None
-            use_shared = shared_index is not None and shared_kv is not None and index > shared_index
+            block_vocab_residual = (
+                vocab_residual
+                if vocab_residual is not None and index in self.ve_layers
+                else None
+            )
+            use_shared = (
+                shared_index is not None
+                and shared_kv is not None
+                and index > shared_index
+            )
             kv_source = shared_kv if use_shared else None
 
             if self._gradient_checkpointing and self.training:
+
                 def run_block(
                     hidden: torch.Tensor,
                     layer_block: TinyTransformerBlock = block,
-                    layer_kv_source: tuple[torch.Tensor, torch.Tensor] | None = kv_source,
+                    layer_kv_source: (
+                        tuple[torch.Tensor, torch.Tensor] | None
+                    ) = kv_source,
                     layer_vocab_residual: torch.Tensor | None = block_vocab_residual,
                 ):
                     return layer_block(

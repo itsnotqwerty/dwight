@@ -6,10 +6,19 @@ import math
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from dwight.tokenizer import TiktokenWrapper
 from dwight.training.dataset import chan_dataloader
-from dwight.training.train import _cosine_decay_lr, _min_training_seq_len, _training_seq_len
+from dwight.training.train import (
+    _cosine_decay_lr,
+    _min_training_seq_len,
+    _maybe_offload_auxiliary_state,
+    _training_batch_size,
+    _training_grad_accum_steps,
+    _training_uses_gradient_checkpointing,
+    _training_seq_len,
+)
 
 # Force num_workers=0 so mocks work in-process
 _real_dataloader = __import__("torch.utils.data", fromlist=["DataLoader"]).DataLoader
@@ -59,7 +68,24 @@ def test_training_seq_len_uses_tiny_runtime_default():
 
     cfg = TinyModelConfig()
     assert _training_seq_len(cfg) == 2048
+    assert _training_batch_size(cfg, None) == 1
+    assert _training_grad_accum_steps(cfg, None) == 8
     assert _min_training_seq_len(cfg) == 256
+
+
+def test_training_defaults_respect_explicit_overrides():
+    from dwight.model.tiny import TinyModelConfig
+
+    cfg = TinyModelConfig()
+    assert _training_batch_size(cfg, 3) == 3
+    assert _training_grad_accum_steps(cfg, 5) == 5
+
+
+def test_tiny_training_disables_gradient_checkpointing_by_default():
+    from dwight.model.tiny import TinyModelConfig
+
+    cfg = TinyModelConfig()
+    assert _training_uses_gradient_checkpointing(cfg, torch.device("cuda")) is False
 
 
 def test_training_seq_len_falls_back_to_max_seq_len():
@@ -67,7 +93,10 @@ def test_training_seq_len_falls_back_to_max_seq_len():
 
     cfg = ModelConfig(max_seq_len=1024)
     assert _training_seq_len(cfg) == 1024
+    assert _training_batch_size(cfg, None) == 8
+    assert _training_grad_accum_steps(cfg, None) == 1
     assert _min_training_seq_len(cfg) == 128
+    assert _training_uses_gradient_checkpointing(cfg, torch.device("cuda")) is True
 
 
 # ── Dataset creation ──────────────────────────────────────────────────────────
@@ -118,3 +147,17 @@ def test_chan_dataloader_returns_dataloader(tokenizer):
     ):
         ds = chan_dataloader("fake.tar.zst", tokenizer, seq_len=8, batch_size=2)
     assert isinstance(ds, DataLoader)
+
+
+def test_maybe_offload_auxiliary_state_calls_model_hook():
+    class DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.called = False
+
+        def offload_auxiliary_state_to_cpu(self) -> None:
+            self.called = True
+
+    model = DummyModel()
+    _maybe_offload_auxiliary_state(model)
+    assert model.called is True

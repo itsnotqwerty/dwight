@@ -9,7 +9,11 @@ from .config import TinyModelConfig
 
 
 def _chunked(tokens: torch.Tensor, chunk_size: int) -> list[torch.Tensor]:
-    return [tokens[i : i + chunk_size] for i in range(0, tokens.numel(), chunk_size) if tokens[i : i + chunk_size].numel() > 1]
+    return [
+        tokens[i : i + chunk_size]
+        for i in range(0, tokens.numel(), chunk_size)
+        if tokens[i : i + chunk_size].numel() > 1
+    ]
 
 
 def _score_chunk(model: torch.nn.Module, chunk: torch.Tensor, vocab_size: int) -> float:

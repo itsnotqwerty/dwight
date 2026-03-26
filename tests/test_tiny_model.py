@@ -70,7 +70,9 @@ def test_tiny_model_forward_shape(tiny_arch_model, tiny_arch_config):
 
 
 def test_tiny_model_generate_outputs_ids(tiny_arch_model, tiny_arch_config):
-    generated = list(tiny_arch_model.generate([1, 2, 3], max_new_tokens=4, temperature=0.0))
+    generated = list(
+        tiny_arch_model.generate([1, 2, 3], max_new_tokens=4, temperature=0.0)
+    )
     assert len(generated) == 4
     assert all(0 <= token < tiny_arch_config.vocab_size for token in generated)
 
@@ -108,9 +110,10 @@ def test_tiny_model_ema_updates(tiny_arch_model):
     model.update_ema()
     after = model.ema_shadow["token_embedding.weight"]
     assert not torch.equal(before, after)
+    assert after.device.type == "cpu"
 
 
-def test_tiny_model_ema_resyncs_shadow_dtype_and_device_metadata(tiny_arch_model):
+def test_tiny_model_ema_resyncs_shadow_dtype_on_cpu(tiny_arch_model):
     model = tiny_arch_model
     model.reset_ema()
     model.ema_shadow["token_embedding.weight"] = model.ema_shadow[
@@ -120,7 +123,25 @@ def test_tiny_model_ema_resyncs_shadow_dtype_and_device_metadata(tiny_arch_model
     shadow = model.ema_shadow["token_embedding.weight"]
     weight = model.token_embedding.weight
     assert shadow.dtype == weight.dtype
-    assert shadow.device == weight.device
+    assert shadow.device.type == "cpu"
+
+
+def test_tiny_model_swa_snapshots_stay_on_cpu(tiny_arch_model):
+    tiny_arch_model.record_swa_snapshot()
+    snapshot = tiny_arch_model._swa_snapshots[0]
+    assert snapshot["token_embedding.weight"].device.type == "cpu"
+
+
+def test_tiny_model_offloads_auxiliary_state_to_cpu(tiny_arch_model):
+    tiny_arch_model.reset_ema()
+    tiny_arch_model.record_swa_snapshot()
+    tiny_arch_model.offload_auxiliary_state_to_cpu()
+    assert all(tensor.device.type == "cpu" for tensor in tiny_arch_model.ema_shadow.values())
+    assert all(
+        tensor.device.type == "cpu"
+        for snapshot in tiny_arch_model._swa_snapshots
+        for tensor in snapshot.values()
+    )
 
 
 def test_quantize_int6_returns_expected_payload():

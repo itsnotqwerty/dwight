@@ -23,7 +23,14 @@ def test_load_model_returns_expected_types(monkeypatch, tiny_arch_config):
 
     class SmallDwightConfig(ModelConfig):
         def __init__(self):
-            super().__init__(num_layers=1, d_model=32, num_heads=2, dff=64, max_seq_len=16, dropout=0.0)
+            super().__init__(
+                num_layers=1,
+                d_model=32,
+                num_heads=2,
+                dff=64,
+                max_seq_len=16,
+                dropout=0.0,
+            )
 
     class SmallTinyConfig(TinyModelConfig):
         def __init__(self):

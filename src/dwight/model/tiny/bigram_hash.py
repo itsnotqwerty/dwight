@@ -12,13 +12,19 @@ class BigramHashEmbedding(nn.Module):
         self.vocab_size = vocab_size
         self.bigram_vocab_size = bigram_vocab_size
         self.embedding = nn.Embedding(bigram_vocab_size, d_model)
-        self.register_buffer("_prime_a", torch.tensor(1_315_423_911, dtype=torch.long), persistent=False)
-        self.register_buffer("_prime_b", torch.tensor(2_654_435_761, dtype=torch.long), persistent=False)
+        self.register_buffer(
+            "_prime_a", torch.tensor(1_315_423_911, dtype=torch.long), persistent=False
+        )
+        self.register_buffer(
+            "_prime_b", torch.tensor(2_654_435_761, dtype=torch.long), persistent=False
+        )
 
     def hashed_ids(self, tokens: torch.Tensor) -> torch.Tensor:
         previous = torch.zeros_like(tokens)
         previous[:, 1:] = tokens[:, :-1]
-        hashed = ((previous * self._prime_a) ^ (tokens * self._prime_b)) % self.bigram_vocab_size
+        hashed = (
+            (previous * self._prime_a) ^ (tokens * self._prime_b)
+        ) % self.bigram_vocab_size
         return hashed.long()
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:

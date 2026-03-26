@@ -57,7 +57,9 @@ async def create_chat_completion(body: ChatCompletionRequest, req: Request):
 
     if body.stream:
         return StreamingResponse(
-            _sse_stream(model, tokenizer, body, prompt, completion_id, created, max_tok),
+            _sse_stream(
+                model, tokenizer, body, prompt, completion_id, created, max_tok
+            ),
             media_type="text/event-stream",
         )
 
