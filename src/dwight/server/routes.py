@@ -8,6 +8,7 @@ import uuid
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
+from ..model.registry import MODEL_REGISTRY
 from .generation import format_chat_prompt, generate_tokens
 from .schemas import (
     ChatCompletionChunk,
@@ -22,21 +23,21 @@ from .schemas import (
 
 router = APIRouter()
 
-_MODEL_ID = "dwight"
-
 
 @router.get("/v1/models")
-async def list_models():
+async def list_models(req: Request):
     """Return the list of available models."""
+    available_models = getattr(req.app.state, "available_models", list(MODEL_REGISTRY))
     return {
         "object": "list",
         "data": [
             {
-                "id": _MODEL_ID,
+                "id": model_id,
                 "object": "model",
                 "created": 1_700_000_000,
                 "owned_by": "user",
             }
+            for model_id in available_models
         ],
     }
 

@@ -10,43 +10,23 @@ import torch
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
-from ..config import ModelConfig
-from ..model.transformer import GPTModel
+from ..model.registry import MODEL_REGISTRY, load_model
 from ..tokenizer import TiktokenWrapper
 from .routes import router
-
-_CHECKPOINT = os.path.join("checkpoints", "model.pt")
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    config = ModelConfig()
     tokenizer = TiktokenWrapper()
-    model = GPTModel(config)
-
-    if os.path.exists(_CHECKPOINT):
-        ckpt = torch.load(_CHECKPOINT, weights_only=False, map_location=device)
-        state_dict = (
-            ckpt["model_state_dict"]
-            if isinstance(ckpt, dict) and "model_state_dict" in ckpt
-            else ckpt
-        )
-        try:
-            model.load_state_dict(state_dict)
-            print(f"Loaded weights from {_CHECKPOINT} (device: {device})")
-        except RuntimeError as exc:
-            print(
-                f"Warning: checkpoint {_CHECKPOINT} is incompatible with the current "
-                f"model architecture ({exc}). Starting with random weights."
-            )
-    else:
-        print(f"No checkpoint found – starting with random weights (device: {device}).")
-
-    model.to(device)
-    model.eval()
+    model, config, checkpoint_path = load_model("dwight", device)
     app.state.model = model
+    app.state.model_config = config
+    app.state.active_model_id = "dwight"
+    app.state.active_checkpoint_path = checkpoint_path
+    app.state.available_models = list(MODEL_REGISTRY)
+    app.state.device = device
     app.state.tokenizer = tokenizer
     app.state.training_process = None
     app.state.training_log_lines: list[str] = []  # type: ignore

@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import click
 from dotenv import load_dotenv
+from typing import cast
 
 load_dotenv()  # Load .env from the working directory (no-op if absent); env vars take priority.
 
+from dwight.model.registry import MODEL_REGISTRY, load_model
+from dwight.model.tiny import TinyModel
+from dwight.model.transformer import GPTModel
 from dwight.training.dataset import DEFAULT_ARCHIVE
 
 
@@ -57,6 +61,14 @@ def serve(host: str, port: int, reload: bool, web_ui: bool) -> None:
     help="Path to model weights.",
 )
 @click.option(
+    "--model",
+    "model_id",
+    type=click.Choice(list(MODEL_REGISTRY)),
+    default="dwight",
+    show_default=True,
+    help="Model architecture to use.",
+)
+@click.option(
     "--max-tokens", default=100, show_default=True, type=int, help="Tokens to generate."
 )
 @click.option(
@@ -74,19 +86,23 @@ def serve(host: str, port: int, reload: bool, web_ui: bool) -> None:
     help="Nucleus sampling probability.",
 )
 def predict(
-    prompt: str, checkpoint: str, max_tokens: int, temperature: float, top_p: float
+    prompt: str,
+    checkpoint: str,
+    model_id: str,
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
 ) -> None:
     """Feed-forward completion of PROMPT."""
     import os
     import torch
-    from dwight.config import ModelConfig
-    from dwight.model.transformer import GPTModel
     from dwight.tokenizer import TiktokenWrapper
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    config = ModelConfig()
     tokenizer = TiktokenWrapper()
-    model = GPTModel(config)
+    loaded_model, _, default_checkpoint = load_model(model_id, device)
+    model = cast(GPTModel | TinyModel, loaded_model)
+    checkpoint = checkpoint or default_checkpoint
 
     if os.path.exists(checkpoint):
         ckpt = torch.load(checkpoint, weights_only=False, map_location=device)
@@ -166,6 +182,14 @@ def predict(
     type=int,
     help="Accumulate gradients over N micro-batches before each optimizer step.",
 )
+@click.option(
+    "--model",
+    "model_id",
+    type=click.Choice(list(MODEL_REGISTRY)),
+    default="dwight",
+    show_default=True,
+    help="Model architecture to train.",
+)
 def train(
     epochs: int,
     batch_size: int,
@@ -176,6 +200,7 @@ def train(
     data: str,
     resume: bool,
     grad_accum_steps: int,
+    model_id: str,
 ) -> None:
     """Train the transformer on the 4chan /pol/ archive."""
     from dwight.training.train import train as _train
@@ -190,6 +215,7 @@ def train(
         data=data,
         resume=resume,
         grad_accum_steps=grad_accum_steps,
+        model_id=model_id,
     )
 
 

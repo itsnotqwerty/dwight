@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import gc
 import json
 import sys
 import threading
@@ -27,12 +28,62 @@ from .auth import (
     set_session_cookie,
 )
 from .generation import generate_tokens
+from ..model.registry import MODEL_REGISTRY, get_model_entry, load_model
 
 ui_router = APIRouter()
 
 _templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
+def _active_model_id(app) -> str:
+    return getattr(app.state, "active_model_id", "dwight")
+
+
+def _available_models(app) -> list[str]:
+    return list(getattr(app.state, "available_models", list(MODEL_REGISTRY)))
+
+
+def _active_config(app):
+    config = getattr(app.state, "model_config", None)
+    if config is not None:
+        return config
+    return get_model_entry(_active_model_id(app)).config_cls()
+
+
+def _active_checkpoint_path(app) -> Path:
+    checkpoint_path = getattr(app.state, "active_checkpoint_path", None)
+    if checkpoint_path is not None:
+        return Path(checkpoint_path)
+    return Path(get_model_entry(_active_model_id(app)).checkpoint_path)
+
+
+def _checkpoint_info(app) -> dict:
+    checkpoint_path = _active_checkpoint_path(app)
+    checkpoint_info: dict = {
+        "exists": checkpoint_path.exists(),
+        "path": str(checkpoint_path),
+        "name": checkpoint_path.name,
+    }
+    if checkpoint_info["exists"]:
+        stat = checkpoint_path.stat()
+        checkpoint_info["size_mb"] = round(stat.st_size / 1_048_576, 1)
+        checkpoint_info["mtime"] = datetime.datetime.fromtimestamp(stat.st_mtime).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    return checkpoint_info
+
+
+def _training_defaults(config) -> dict[str, int | float | str]:
+    return {
+        "epochs": 3,
+        "batch_size": getattr(config, "train_batch_size", 8),
+        "max_lr": 3e-4,
+        "warmup_steps": 1000,
+        "checkpoint_dir": "checkpoints",
+        "grad_accum_steps": getattr(config, "train_grad_accum_steps", 1),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +93,14 @@ _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 @ui_router.get("/")
 async def inference_page(request: Request, _: None = Depends(require_auth)):
-    return _templates.TemplateResponse(request, "inference.html")
+    return _templates.TemplateResponse(
+        request,
+        "inference.html",
+        context={
+            "available_models": _available_models(request.app),
+            "active_model": _active_model_id(request.app),
+        },
+    )
 
 
 @ui_router.get("/ui/generate")
@@ -109,6 +167,7 @@ async def generate_sse(
 
 
 class TrainStartRequest(BaseModel):
+    model_id: str = "dwight"
     epochs: int = 3
     batch_size: int = 8
     max_lr: float = 3e-4
@@ -119,23 +178,18 @@ class TrainStartRequest(BaseModel):
     grad_accum_steps: int = 1
 
 
+class ModelSelectRequest(BaseModel):
+    model_id: str
+
+
 @ui_router.get("/train")
 async def train_page(request: Request, _: None = Depends(require_auth)):
-    from ..config import ModelConfig
-
-    config = ModelConfig()
+    app = request.app
+    config = _active_config(app)
     config_fields = {f.name: getattr(config, f.name) for f in fields(config)}
 
-    checkpoint_path = Path("checkpoints") / "model.pt"
-    checkpoint_info: dict = {"exists": checkpoint_path.exists()}
-    if checkpoint_info["exists"]:
-        stat = checkpoint_path.stat()
-        checkpoint_info["size_mb"] = round(stat.st_size / 1_048_576, 1)
-        checkpoint_info["mtime"] = datetime.datetime.fromtimestamp(
-            stat.st_mtime
-        ).strftime("%Y-%m-%d %H:%M:%S")
-
-    process = request.app.state.training_process
+    checkpoint_info = _checkpoint_info(app)
+    process = app.state.training_process
     is_training = process is not None and process.returncode is None
 
     return _templates.TemplateResponse(
@@ -145,8 +199,46 @@ async def train_page(request: Request, _: None = Depends(require_auth)):
             "config": config_fields,
             "checkpoint": checkpoint_info,
             "is_training": is_training,
+            "available_models": _available_models(app),
+            "active_model": _active_model_id(app),
+            "training_defaults": _training_defaults(config),
         },
     )
+
+
+@ui_router.post("/ui/model/select")
+async def select_model(
+    body: ModelSelectRequest, request: Request, _: None = Depends(require_auth)
+):
+    app = request.app
+    if body.model_id not in MODEL_REGISTRY:
+        return {"ok": False, "error": f"Unknown model: {body.model_id}"}
+
+    process = getattr(app.state, "training_process", None)
+    if process is not None and process.returncode is None:
+        return {"ok": False, "error": "Cannot switch models while training is running."}
+
+    thread = getattr(app.state, "finetune_thread", None)
+    if thread is not None and thread.is_alive():
+        return {"ok": False, "error": "Cannot switch models while fine-tuning is running."}
+
+    device = getattr(app.state, "device", torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+    current_model = getattr(app.state, "model", None)
+    if current_model is not None:
+        current_model.to("cpu")
+        del current_model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    model, config, checkpoint_path = load_model(body.model_id, device)
+    app.state.model = model
+    app.state.model_config = config
+    app.state.active_model_id = body.model_id
+    app.state.active_checkpoint_path = checkpoint_path
+    app.state.rlhf_optimizer = None
+    app.state.rlhf_pending = None
+    return {"ok": True, "model_id": body.model_id}
 
 
 @ui_router.post("/ui/train/start")
@@ -164,6 +256,8 @@ async def train_start(
         "-m",
         "dwight",
         "train",
+        "--model",
+        body.model_id,
         "--epochs",
         str(body.epochs),
         "--batch-size",
@@ -301,18 +395,8 @@ class RlhfRateRequest(BaseModel):
 
 @ui_router.get("/tune")
 async def tune_page(request: Request, _: None = Depends(require_auth)):
-    from ..config import ModelConfig
-
-    checkpoint_path = Path("checkpoints") / "model.pt"
-    checkpoint_info: dict = {"exists": checkpoint_path.exists()}
-    if checkpoint_info["exists"]:
-        stat = checkpoint_path.stat()
-        checkpoint_info["size_mb"] = round(stat.st_size / 1_048_576, 1)
-        checkpoint_info["mtime"] = datetime.datetime.fromtimestamp(
-            stat.st_mtime
-        ).strftime("%Y-%m-%d %H:%M:%S")
-
     app = request.app
+    config = _active_config(app)
     thread = app.state.finetune_thread
     is_sft_running = thread is not None and thread.is_alive()
 
@@ -320,10 +404,13 @@ async def tune_page(request: Request, _: None = Depends(require_auth)):
         request,
         "tune.html",
         context={
-            "checkpoint": checkpoint_info,
+            "checkpoint": _checkpoint_info(app),
+            "config": {f.name: getattr(config, f.name) for f in fields(config)},
             "is_sft_running": is_sft_running,
             "finetune_status": app.state.finetune_status,
             "default_corpus": _DEFAULT_CORPUS,
+            "available_models": _available_models(app),
+            "active_model": _active_model_id(app),
         },
     )
 
@@ -350,10 +437,10 @@ async def tune_sft_start(
     model = app.state.model
     tokenizer = app.state.tokenizer
 
-    from ..config import ModelConfig
     from ..training.finetune import sft_finetune
 
-    config = ModelConfig()
+    config = _active_config(app)
+    checkpoint_name = _active_checkpoint_path(app).name
 
     def run():
         try:
@@ -368,6 +455,7 @@ async def tune_sft_start(
                 max_steps=body.max_steps,
                 stop_event=stop_event,
                 log_fn=lambda line: app.state.finetune_log_lines.append(line),
+                checkpoint_name=checkpoint_name,
             )
         except Exception as exc:
             app.state.finetune_log_lines.append(f"[SFT] Error: {exc}")
@@ -497,10 +585,9 @@ async def tune_rlhf_rate(
 
     optimizer = app.state.rlhf_optimizer
 
-    from ..config import ModelConfig
     from ..training.finetune import rlhf_step
 
-    config = ModelConfig()
+    config = _active_config(app)
 
     loop = asyncio.get_running_loop()
 

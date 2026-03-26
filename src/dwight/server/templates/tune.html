@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Fine-tuning – Dwight AI{% endblock %}
-{% block nav_models %}active{% endblock %}
+{% block nav_tuning %}active{% endblock %}
 
 {% block content %}
 <div class="row g-4">
@@ -8,12 +8,29 @@
   <!-- ── Left: SFT settings + checkpoint ─────────────────────────────── -->
   <div class="col-lg-4">
 
+    <div class="card border-secondary mb-3">
+      <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+        <span>Model configuration</span>
+        <span class="badge text-bg-info text-uppercase">{{ active_model }}</span>
+      </div>
+      <table class="table table-sm table-dark table-borderless mb-0 small">
+        <tbody>
+          {% for key, val in config.items() %}
+          <tr>
+            <td class="text-muted ps-3 py-1">{{ key }}</td>
+            <td class="text-end pe-3 font-monospace">{{ val }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
     <!-- Checkpoint -->
     <div class="card border-secondary mb-3">
       <div class="card-header fw-semibold">Checkpoint</div>
       <div class="card-body small">
         {% if checkpoint.exists %}
-          <div class="mb-1"><span class="text-muted">File:</span> checkpoints/model.pt</div>
+          <div class="mb-1"><span class="text-muted">File:</span> {{ checkpoint.path }}</div>
           <div class="mb-1"><span class="text-muted">Size:</span> {{ checkpoint.size_mb }}&nbsp;MB</div>
           <div class="mb-0"><span class="text-muted">Saved:</span> {{ checkpoint.mtime }}</div>
         {% else %}

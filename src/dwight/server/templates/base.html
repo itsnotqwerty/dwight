@@ -28,7 +28,7 @@
 <body>
 <nav class="navbar navbar-expand-lg navbar-dark bg-dark border-bottom border-secondary mb-2">
   <div class="container">
-    <a class="navbar-brand text-info" href="/">&#x2726; Dwight AI</a>
+    <a class="navbar-brand text-info" href="/">&#x2726; AI Office</a>
     <button
       class="navbar-toggler"
       type="button"
@@ -40,10 +40,21 @@
       <span class="navbar-toggler-icon"></span>
     </button>
     <div class="collapse navbar-collapse" id="navbarLinks">
-      <div class="navbar-nav ms-auto gap-1">
+      <div class="d-flex flex-column flex-lg-row align-items-lg-center gap-3 ms-auto w-100 justify-content-lg-end">
+        <div class="d-flex align-items-center gap-2">
+          <label for="model-select" class="small text-secondary text-uppercase mb-0">Model</label>
+          <select id="model-select" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto; min-width: 10rem;">
+            {% for model_name in available_models or ['dwight'] %}
+            <option value="{{ model_name }}" {% if model_name == active_model %}selected{% endif %}>{{ model_name }}</option>
+            {% endfor %}
+          </select>
+          <span id="model-switch-spinner" class="spinner-border spinner-border-sm text-info d-none" role="status"></span>
+        </div>
+        <div class="navbar-nav gap-1">
         <a class="nav-link {% block nav_inference %}{% endblock %}" href="/">Inference</a>
         <a class="nav-link {% block nav_train %}{% endblock %}" href="/train">Training</a>
-				<a class="nav-link {% block nav_tuning %}{% endblock %}" href="/tune">Fine Tuning</a>
+        <a class="nav-link {% block nav_tuning %}{% endblock %}" href="/tune">Fine Tuning</a>
+        </div>
       </div>
     </div>
   </div>
@@ -56,6 +67,37 @@
 <script
   src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
   crossorigin="anonymous"></script>
+<script>
+  'use strict';
+
+  const modelSelect = document.getElementById('model-select');
+  const modelSpinner = document.getElementById('model-switch-spinner');
+
+  if (modelSelect) {
+    modelSelect.addEventListener('change', async (event) => {
+      const nextModel = event.target.value;
+      modelSelect.disabled = true;
+      modelSpinner.classList.remove('d-none');
+      try {
+        const response = await fetch('/ui/model/select', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model_id: nextModel }),
+        });
+        const result = await response.json();
+        if (!result.ok) {
+          alert(result.error || 'Model switch failed.');
+          window.location.reload();
+          return;
+        }
+        window.location.reload();
+      } catch (error) {
+        alert('Model switch failed: ' + error.message);
+        window.location.reload();
+      }
+    });
+  }
+</script>
 {% block scripts %}{% endblock %}
 </body>
 </html>

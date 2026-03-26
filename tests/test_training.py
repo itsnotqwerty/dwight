@@ -9,7 +9,7 @@ import pytest
 
 from dwight.tokenizer import TiktokenWrapper
 from dwight.training.dataset import chan_dataloader
-from dwight.training.train import _cosine_decay_lr
+from dwight.training.train import _cosine_decay_lr, _min_training_seq_len, _training_seq_len
 
 # Force num_workers=0 so mocks work in-process
 _real_dataloader = __import__("torch.utils.data", fromlist=["DataLoader"]).DataLoader
@@ -52,6 +52,22 @@ def test_lr_is_monotone_in_warmup():
         for s in range(50)
     ]
     assert all(lrs[i] <= lrs[i + 1] for i in range(len(lrs) - 1))
+
+
+def test_training_seq_len_uses_tiny_runtime_default():
+    from dwight.model.tiny import TinyModelConfig
+
+    cfg = TinyModelConfig()
+    assert _training_seq_len(cfg) == 2048
+    assert _min_training_seq_len(cfg) == 256
+
+
+def test_training_seq_len_falls_back_to_max_seq_len():
+    from dwight.config import ModelConfig
+
+    cfg = ModelConfig(max_seq_len=1024)
+    assert _training_seq_len(cfg) == 1024
+    assert _min_training_seq_len(cfg) == 128
 
 
 # ── Dataset creation ──────────────────────────────────────────────────────────

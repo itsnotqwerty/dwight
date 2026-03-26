@@ -5,12 +5,16 @@ from __future__ import annotations
 import math
 import os
 import time
+from typing import cast
 
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
 from ..config import ModelConfig
+from ..model.registry import get_model_entry
+from ..model.tiny import TinyModel, TinyModelConfig
+from ..model.tiny.muon import ParallelMuon
 from ..model.transformer import GPTModel
 from ..tokenizer import TiktokenWrapper
 from .dataset import DEFAULT_ARCHIVE, chan_dataloader
@@ -40,6 +44,32 @@ def _cosine_decay_lr(
     return min_lr + coeff * (max_lr - min_lr)
 
 
+def _maybe_update_ema(model: torch.nn.Module) -> None:
+    update_ema = getattr(model, "update_ema", None)
+    if callable(update_ema):
+        update_ema()
+
+
+def _maybe_record_swa_snapshot(model: torch.nn.Module) -> None:
+    record_snapshot = getattr(model, "record_swa_snapshot", None)
+    if callable(record_snapshot):
+        record_snapshot()
+
+
+def _training_seq_len(config: object) -> int:
+    return int(getattr(config, "train_seq_len", getattr(config, "max_seq_len")))
+
+
+def _min_training_seq_len(config: object) -> int:
+    return int(getattr(config, "min_train_seq_len", min(128, _training_seq_len(config))))
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    if isinstance(exc, torch.OutOfMemoryError):
+        return True
+    return "cuda out of memory" in str(exc).lower()
+
+
 def train(
     epochs: int = 3,
     batch_size: int = 8,
@@ -50,7 +80,8 @@ def train(
     data: str = DEFAULT_ARCHIVE,
     resume: bool = False,
     grad_accum_steps: int = 1,
-) -> GPTModel:
+    model_id: str = "dwight",
+) -> torch.nn.Module:
     """Train a GPT model on the 4chan /pol/ archive and return the trained model."""
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -58,27 +89,41 @@ def train(
     if device.type == "cuda":
         amp_dtype = "bfloat16" if torch.cuda.is_bf16_supported() else "float16"
         print(f"AMP enabled on CUDA ({amp_dtype})")
-    config = ModelConfig()
     tokenizer = TiktokenWrapper()
     autocast_kwargs = _autocast_kwargs(device)
+    entry = get_model_entry(model_id)
+    config = entry.config_cls()
+    current_batch_size = batch_size
+    current_seq_len = _training_seq_len(config)
+    min_seq_len = _min_training_seq_len(config)
 
     print(f"Streaming dataset from {data} …")
-    loader = chan_dataloader(
-        data,
-        tokenizer,
-        seq_len=config.max_seq_len,
-        batch_size=batch_size,
+    print(
+        f"Training runtime: seq_len={current_seq_len}, batch_size={current_batch_size}, "
+        f"grad_accum_steps={grad_accum_steps}"
     )
     # The archive is too large to count upfront; use max_steps when known.
     total_steps = max_steps if max_steps is not None else warmup_steps * 100
 
-    model = GPTModel(config).to(device)
+    model = cast(GPTModel | TinyModel, entry.model_cls(config).to(device))
     if device.type == "cuda":
         model.enable_gradient_checkpointing()
-    optimizer = torch.optim.Adam(model.parameters(), lr=max_lr, betas=(0.9, 0.95))
+    if model_id == "tiny":
+        assert isinstance(config, TinyModelConfig)
+        optimizer = ParallelMuon(
+            model,
+            matrix_lr=config.matrix_lr,
+            scalar_lr=config.scalar_lr,
+            tied_embed_lr=config.tied_embed_lr,
+            momentum=config.muon_momentum,
+            matrix_weight_decay=config.muon_wd,
+            scalar_weight_decay=config.adam_wd,
+        )
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=max_lr, betas=(0.9, 0.95))
 
     os.makedirs(checkpoint_dir, exist_ok=True)
-    checkpoint_path = os.path.join(checkpoint_dir, "model.pt")
+    checkpoint_path = os.path.join(checkpoint_dir, os.path.basename(entry.checkpoint_path))
     _CHECKPOINT_INTERVAL_SECS = 30 * 60  # 30 minutes
     _CHECKPOINT_INTERVAL_STEPS = 10_000
 
@@ -135,81 +180,136 @@ def train(
         )
 
     for epoch in range(start_epoch, epochs + 1):
-        model.train()
-        running_loss = 0.0
-        n_batches = 0
-        accum_loss = 0.0
-        micro_step = 0
-        optimizer.zero_grad(set_to_none=True)
-        pbar = tqdm(loader, desc=f"Epoch {epoch}/{epochs}")
+        while True:
+            print(
+                f"Epoch {epoch}/{epochs}: loading seq_len={current_seq_len}, batch_size={current_batch_size}"
+            )
+            loader = chan_dataloader(
+                data,
+                tokenizer,
+                seq_len=current_seq_len,
+                batch_size=current_batch_size,
+            )
+            model.train()
+            running_loss = 0.0
+            n_batches = 0
+            accum_loss = 0.0
+            micro_step = 0
+            retry_epoch = False
+            optimizer.zero_grad(set_to_none=True)
+            pbar = tqdm(loader, desc=f"Epoch {epoch}/{epochs}")
 
-        for inp, tgt in pbar:
-            if max_steps is not None and global_step >= max_steps:
-                break
+            for inp, tgt in pbar:
+                if max_steps is not None and global_step >= max_steps:
+                    break
 
-            try:
-                inp = inp.to(device)
-                tgt = tgt.to(device)
+                try:
+                    inp = inp.to(device)
+                    tgt = tgt.to(device)
 
-                with torch.autocast(device_type=device.type, **autocast_kwargs):
-                    logits = model(inp)
-                    loss = F.cross_entropy(
-                        logits.view(-1, config.vocab_size),
-                        tgt.view(-1),
-                    )
-            except RuntimeError as exc:
-                if device.type == "cuda" and "cuda out of memory" in str(exc).lower():
+                    with torch.autocast(device_type=device.type, **autocast_kwargs):
+                        logits = model(inp)
+                        loss = F.cross_entropy(
+                            logits.view(-1, config.vocab_size),
+                            tgt.view(-1),
+                        )
+                    (loss / grad_accum_steps).backward()
+                    accum_loss += loss.item()
+                    micro_step += 1
+
+                    if micro_step % grad_accum_steps != 0:
+                        continue
+
+                    lr = _cosine_decay_lr(global_step, warmup_steps, total_steps, max_lr)
+                    for param_group in optimizer.param_groups:
+                        param_group["lr"] = lr
+
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
+                    _maybe_update_ema(model)
+                    if isinstance(config, TinyModelConfig):
+                        if global_step > 0 and global_step % config.swa_every == 0:
+                            _maybe_record_swa_snapshot(model)
+                    optimizer.zero_grad(set_to_none=True)
+
+                    running_loss += accum_loss / grad_accum_steps
+                    n_batches += 1
+                    global_step += 1
+                    accum_loss = 0.0
+                    avg_loss = running_loss / n_batches
+                    pbar.set_postfix(loss=f"{avg_loss:.4f}", lr=f"{lr:.2e}")
+
+                    steps_since_ckpt = global_step - last_ckpt_step
+                    time_since_ckpt = time.monotonic() - last_ckpt_time
+                    if (
+                        steps_since_ckpt >= _CHECKPOINT_INTERVAL_STEPS
+                        or time_since_ckpt >= _CHECKPOINT_INTERVAL_SECS
+                    ):
+                        _save_checkpoint(avg_loss, global_step, completed_epochs=epoch - 1)
+                        last_ckpt_step = global_step
+                        last_ckpt_time = time.monotonic()
+                except RuntimeError as exc:
+                    if device.type != "cuda" or not _is_cuda_oom(exc):
+                        raise
+                    optimizer.zero_grad(set_to_none=True)
                     torch.cuda.empty_cache()
+                    if current_batch_size > 1:
+                        new_batch_size = max(1, current_batch_size // 2)
+                        print(
+                            f"CUDA OOM during training; reducing batch_size {current_batch_size} -> {new_batch_size} and retrying epoch {epoch}."
+                        )
+                        current_batch_size = new_batch_size
+                        retry_epoch = True
+                        break
+                    if current_seq_len > min_seq_len:
+                        new_seq_len = max(min_seq_len, current_seq_len // 2)
+                        print(
+                            f"CUDA OOM during training at batch_size=1; reducing seq_len {current_seq_len} -> {new_seq_len} and retrying epoch {epoch}."
+                        )
+                        current_seq_len = new_seq_len
+                        retry_epoch = True
+                        break
                     raise RuntimeError(
-                        "CUDA OOM during training. Try --batch-size 1 and increase "
-                        "--grad-accum-steps, or reduce max_seq_len in ModelConfig."
+                        "CUDA OOM during training even after reducing batch_size to 1 "
+                        f"and seq_len to {current_seq_len}."
                     ) from exc
-                raise
 
-            (loss / grad_accum_steps).backward()
-            accum_loss += loss.item()
-            micro_step += 1
-
-            if micro_step % grad_accum_steps != 0:
+            if retry_epoch:
                 continue
 
-            lr = _cosine_decay_lr(global_step, warmup_steps, total_steps, max_lr)
-            for param_group in optimizer.param_groups:
-                param_group["lr"] = lr
+            if accum_loss > 0.0:
+                try:
+                    remainder = micro_step % grad_accum_steps or grad_accum_steps
+                    lr = _cosine_decay_lr(global_step, warmup_steps, total_steps, max_lr)
+                    for param_group in optimizer.param_groups:
+                        param_group["lr"] = lr
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
+                    _maybe_update_ema(model)
+                    optimizer.zero_grad(set_to_none=True)
+                    running_loss += accum_loss / remainder
+                    n_batches += 1
+                    global_step += 1
+                except RuntimeError as exc:
+                    if device.type != "cuda" or not _is_cuda_oom(exc):
+                        raise
+                    optimizer.zero_grad(set_to_none=True)
+                    torch.cuda.empty_cache()
+                    if current_seq_len > min_seq_len:
+                        current_seq_len = max(min_seq_len, current_seq_len // 2)
+                        print(
+                            f"CUDA OOM during optimizer step; reducing seq_len to {current_seq_len} and retrying epoch {epoch}."
+                        )
+                        retry_epoch = True
+                    else:
+                        raise RuntimeError(
+                            "CUDA OOM during optimizer step even at minimum tiny training sequence length."
+                        ) from exc
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
+            if retry_epoch:
+                continue
 
-            running_loss += accum_loss / grad_accum_steps
-            n_batches += 1
-            global_step += 1
-            accum_loss = 0.0
-            avg_loss = running_loss / n_batches
-            pbar.set_postfix(loss=f"{avg_loss:.4f}", lr=f"{lr:.2e}")
-
-            steps_since_ckpt = global_step - last_ckpt_step
-            time_since_ckpt = time.monotonic() - last_ckpt_time
-            if (
-                steps_since_ckpt >= _CHECKPOINT_INTERVAL_STEPS
-                or time_since_ckpt >= _CHECKPOINT_INTERVAL_SECS
-            ):
-                _save_checkpoint(avg_loss, global_step, completed_epochs=epoch - 1)
-                last_ckpt_step = global_step
-                last_ckpt_time = time.monotonic()
-
-        # Flush leftover accumulated gradients if the epoch didn't end on a full accumulation window.
-        if accum_loss > 0.0:
-            remainder = micro_step % grad_accum_steps or grad_accum_steps
-            lr = _cosine_decay_lr(global_step, warmup_steps, total_steps, max_lr)
-            for param_group in optimizer.param_groups:
-                param_group["lr"] = lr
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            running_loss += accum_loss / remainder
-            n_batches += 1
-            global_step += 1
+            break
 
         avg_loss = running_loss / max(n_batches, 1)
         _save_checkpoint(avg_loss, global_step, completed_epochs=epoch)

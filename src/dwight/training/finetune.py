@@ -45,7 +45,7 @@ def _is_cuda_oom(exc: BaseException) -> bool:
 
 
 def sft_finetune(
-    model: GPTModel,
+    model: torch.nn.Module,
     tokenizer: TiktokenWrapper,
     config: ModelConfig,
     *,
@@ -57,6 +57,7 @@ def sft_finetune(
     stop_event: threading.Event | None = None,
     log_fn: Callable[[str], None] | None = None,
     checkpoint_dir: str = "checkpoints",
+    checkpoint_name: str = "model.pt",
 ) -> None:
     """Fine-tune *model* on a plain-text corpus file in the calling thread.
 
@@ -92,7 +93,7 @@ def sft_finetune(
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     device = next(model.parameters()).device
     os.makedirs(checkpoint_dir, exist_ok=True)
-    ckpt_path = Path(checkpoint_dir) / "model.pt"
+    ckpt_path = Path(checkpoint_dir) / checkpoint_name
     autocast_kwargs = _autocast_kwargs(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95))
@@ -203,7 +204,7 @@ def sft_finetune(
 
 
 def _save_checkpoint(
-    model: GPTModel,
+    model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     path: Path,
     epoch: int,
@@ -231,7 +232,7 @@ def _save_checkpoint(
 
 
 def rlhf_step(
-    model: GPTModel,
+    model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     tokenizer: TiktokenWrapper,
     config: ModelConfig,
