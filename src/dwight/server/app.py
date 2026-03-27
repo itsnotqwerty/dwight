@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import os
 import threading
+from pathlib import Path
 
 import numpy as np
 import torch
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from ..model.registry import MODEL_REGISTRY, load_model
 from ..tokenizer import TiktokenWrapper
@@ -65,4 +67,9 @@ def create_app() -> FastAPI:
             _LoginRedirect, lambda req, exc: login_redirect_response()
         )
         app.include_router(ui_router)
+        app.mount(
+            "/static",
+            StaticFiles(directory=Path(__file__).parent / "static"),
+            name="static",
+        )
     return app

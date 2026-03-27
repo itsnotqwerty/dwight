@@ -68,10 +68,12 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/format.js"></script>
 <script>
   'use strict';
 
   let evtSource = null;
+  let outputBuffer = '';
 
   const promptEl  = document.getElementById('prompt');
   const outputEl  = document.getElementById('output');
@@ -103,6 +105,7 @@
     if (!prompt) { promptEl.focus(); return; }
 
     outputEl.textContent = '';
+    outputBuffer = '';
 
     const params = new URLSearchParams({
       prompt,
@@ -120,9 +123,12 @@
       if (d.done) {
         evtSource.close();
         evtSource = null;
+        DwightFormat.applyToElement(outputEl, outputBuffer);
+        outputEl.scrollTop = outputEl.scrollHeight;
         setGenerating(false);
       } else if (d.token !== undefined) {
-        outputEl.textContent += d.token;
+        outputBuffer += d.token;
+        DwightFormat.applyToElement(outputEl, outputBuffer);
         outputEl.scrollTop = outputEl.scrollHeight;
       }
     };

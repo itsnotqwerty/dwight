@@ -189,6 +189,7 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/format.js"></script>
 <script>
   'use strict';
 
@@ -346,6 +347,10 @@
     completions.forEach((text, i) => {
       const card = document.createElement('div');
       card.className = 'card border-secondary bg-dark';
+      const preEl = document.createElement('pre');
+      preEl.className = 'mb-0 small text-light';
+      preEl.style.cssText = 'white-space:pre-wrap;word-break:break-word';
+      DwightFormat.applyToElement(preEl, text);
       card.innerHTML = `
         <div class="card-header d-flex align-items-center gap-2 py-2">
           <span class="fw-semibold small text-muted">Completion ${i + 1}</span>
@@ -363,20 +368,13 @@
             <label class="btn btn-sm btn-outline-danger" for="down-${i}" title="Thumbs down">👎</label>
           </div>
         </div>
-        <div class="card-body py-2">
-          <pre class="mb-0 small text-light" style="white-space:pre-wrap;word-break:break-word">${escapeHtml(text)}</pre>
-        </div>`;
+        <div class="card-body py-2"></div>`;
+      card.querySelector('.card-body').appendChild(preEl);
       completionCards.appendChild(card);
     });
   }
 
-  function escapeHtml(str) {
-    return str
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
-  }
+  const escapeHtml = DwightFormat.escapeHtml;
 
   btnRate.addEventListener('click', async () => {
     if (currentCompletions.length === 0) { showRateError('Generate completions first.'); return; }
