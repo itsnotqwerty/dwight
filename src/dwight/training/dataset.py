@@ -120,7 +120,10 @@ def chan_dataloader(
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        num_workers=2,
+        # The archive is a single compressed stream, so extra workers only
+        # duplicate the read/decompression work and create multiprocessing
+        # semaphores that can be left behind on interrupted retries.
+        num_workers=0,
         pin_memory=True,
     )
 

@@ -75,6 +75,25 @@ def _checkpoint_info(app) -> dict:
     return checkpoint_info
 
 
+def _artifact_info(app) -> dict | None:
+    entry = get_model_entry(_active_model_id(app))
+    if entry.artifact_path is None:
+        return None
+    artifact_path = Path(entry.artifact_path)
+    info: dict = {
+        "exists": artifact_path.exists(),
+        "path": str(artifact_path),
+        "name": artifact_path.name,
+    }
+    if info["exists"]:
+        stat = artifact_path.stat()
+        info["size_mb"] = round(stat.st_size / 1_048_576, 1)
+        info["mtime"] = datetime.datetime.fromtimestamp(stat.st_mtime).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    return info
+
+
 def _training_defaults(config) -> dict[str, int | float | str]:
     return {
         "epochs": 3,
@@ -202,6 +221,7 @@ async def train_page(request: Request, _: None = Depends(require_auth)):
             "available_models": _available_models(app),
             "active_model": _active_model_id(app),
             "training_defaults": _training_defaults(config),
+            "artifact": _artifact_info(app),
         },
     )
 
@@ -418,6 +438,7 @@ async def tune_page(request: Request, _: None = Depends(require_auth)):
             "default_corpus": _DEFAULT_CORPUS,
             "available_models": _available_models(app),
             "active_model": _active_model_id(app),
+            "artifact": _artifact_info(app),
         },
     )
 

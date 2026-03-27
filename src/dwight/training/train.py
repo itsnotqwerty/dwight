@@ -15,6 +15,7 @@ from ..config import ModelConfig
 from ..model.registry import get_model_entry
 from ..model.tiny import TinyModel, TinyModelConfig
 from ..model.tiny.muon import ParallelMuon
+from ..model.tiny.quantize import save_artifact
 from ..model.transformer import GPTModel
 from ..tokenizer import TiktokenWrapper
 from .dataset import DEFAULT_ARCHIVE, chan_dataloader
@@ -44,6 +45,26 @@ def _cosine_decay_lr(
     return min_lr + coeff * (max_lr - min_lr)
 
 
+def _next_step_checkpoint(step: int, interval: int) -> int:
+    if interval <= 0:
+        raise ValueError("checkpoint interval must be positive")
+    return ((step // interval) + 1) * interval
+
+
+def _apply_scheduled_lr(
+    optimizer: torch.optim.Optimizer | ParallelMuon,
+    scheduled_lr: float,
+    max_lr: float,
+) -> None:
+    if max_lr <= 0.0:
+        scale = 0.0
+    else:
+        scale = scheduled_lr / max_lr
+    for param_group in optimizer.param_groups:
+        base_lr = float(param_group.setdefault("initial_lr", param_group["lr"]))
+        param_group["lr"] = base_lr * scale
+
+
 def _maybe_update_ema(model: torch.nn.Module) -> None:
     update_ema = getattr(model, "update_ema", None)
     if callable(update_ema):
@@ -60,6 +81,15 @@ def _maybe_offload_auxiliary_state(model: torch.nn.Module) -> None:
     offload_auxiliary_state = getattr(model, "offload_auxiliary_state_to_cpu", None)
     if callable(offload_auxiliary_state):
         offload_auxiliary_state()
+
+
+def _cleanup_after_cuda_oom(
+    optimizer: torch.optim.Optimizer | ParallelMuon,
+    model: torch.nn.Module,
+) -> None:
+    optimizer.zero_grad(set_to_none=True)
+    _maybe_offload_auxiliary_state(model)
+    torch.cuda.empty_cache()
 
 
 def _training_seq_len(config: object) -> int:
@@ -172,8 +202,8 @@ def train(
         print(f"\nCheckpoint saved at step {step} — loss: {avg_loss:.4f}")
 
     global_step = 0
-    last_ckpt_step = 0
-    last_ckpt_time = time.monotonic()
+    next_step_ckpt = _next_step_checkpoint(0, _CHECKPOINT_INTERVAL_STEPS)
+    last_timed_ckpt = time.monotonic()
     start_epoch = 1
 
     if resume and os.path.exists(checkpoint_path):
@@ -188,8 +218,10 @@ def train(
             if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
                 optimizer.load_state_dict(ckpt["optimizer_state_dict"])
                 global_step = ckpt.get("global_step", 0)
-                last_ckpt_step = global_step
-                last_ckpt_time = time.monotonic()
+                next_step_ckpt = _next_step_checkpoint(
+                    global_step, _CHECKPOINT_INTERVAL_STEPS
+                )
+                last_timed_ckpt = time.monotonic()
                 start_epoch = ckpt.get("completed_epochs", 0) + 1
                 print(
                     f"Resumed from checkpoint at step {global_step} "
@@ -253,8 +285,7 @@ def train(
                     lr = _cosine_decay_lr(
                         global_step, warmup_steps, total_steps, max_lr
                     )
-                    for param_group in optimizer.param_groups:
-                        param_group["lr"] = lr
+                    _apply_scheduled_lr(optimizer, lr, max_lr)
 
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
@@ -271,23 +302,23 @@ def train(
                     avg_loss = running_loss / n_batches
                     pbar.set_postfix(loss=f"{avg_loss:.4f}", lr=f"{lr:.2e}")
 
-                    steps_since_ckpt = global_step - last_ckpt_step
-                    time_since_ckpt = time.monotonic() - last_ckpt_time
+                    now = time.monotonic()
                     if (
-                        steps_since_ckpt >= _CHECKPOINT_INTERVAL_STEPS
-                        or time_since_ckpt >= _CHECKPOINT_INTERVAL_SECS
+                        global_step >= next_step_ckpt
+                        or now - last_timed_ckpt >= _CHECKPOINT_INTERVAL_SECS
                     ):
                         _save_checkpoint(
                             avg_loss, global_step, completed_epochs=epoch - 1
                         )
-                        last_ckpt_step = global_step
-                        last_ckpt_time = time.monotonic()
+                        if global_step >= next_step_ckpt:
+                            next_step_ckpt = _next_step_checkpoint(
+                                global_step, _CHECKPOINT_INTERVAL_STEPS
+                            )
+                        last_timed_ckpt = now
                 except RuntimeError as exc:
                     if device.type != "cuda" or not _is_cuda_oom(exc):
                         raise
-                    optimizer.zero_grad(set_to_none=True)
-                    _maybe_offload_auxiliary_state(model)
-                    torch.cuda.empty_cache()
+                    _cleanup_after_cuda_oom(optimizer, model)
                     if current_batch_size > 1:
                         new_batch_size = max(1, current_batch_size // 2)
                         print(
@@ -318,8 +349,7 @@ def train(
                     lr = _cosine_decay_lr(
                         global_step, warmup_steps, total_steps, max_lr
                     )
-                    for param_group in optimizer.param_groups:
-                        param_group["lr"] = lr
+                    _apply_scheduled_lr(optimizer, lr, max_lr)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
                     _maybe_update_ema(model)
@@ -330,8 +360,7 @@ def train(
                 except RuntimeError as exc:
                     if device.type != "cuda" or not _is_cuda_oom(exc):
                         raise
-                    optimizer.zero_grad(set_to_none=True)
-                    torch.cuda.empty_cache()
+                    _cleanup_after_cuda_oom(optimizer, model)
                     if current_seq_len > min_seq_len:
                         current_seq_len = max(min_seq_len, current_seq_len // 2)
                         print(
@@ -350,11 +379,17 @@ def train(
 
         avg_loss = running_loss / max(n_batches, 1)
         _save_checkpoint(avg_loss, global_step, completed_epochs=epoch)
-        last_ckpt_step = global_step
-        last_ckpt_time = time.monotonic()
+        next_step_ckpt = _next_step_checkpoint(global_step, _CHECKPOINT_INTERVAL_STEPS)
+        last_timed_ckpt = time.monotonic()
         print(f"Epoch {epoch} complete — loss: {avg_loss:.4f}")
 
         if max_steps is not None and global_step >= max_steps:
             break
+
+    # Export compressed artifact when the model registry defines one
+    entry = get_model_entry(model_id)
+    if entry.artifact_path is not None:
+        save_artifact(model, entry.artifact_path)
+        print(f"Artifact saved \u2192 {entry.artifact_path}")
 
     return model

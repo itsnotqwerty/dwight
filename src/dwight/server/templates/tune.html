@@ -39,6 +39,22 @@
       </div>
     </div>
 
+    {% if artifact is not none %}
+    <!-- Artifact -->
+    <div class="card border-secondary mb-3">
+      <div class="card-header fw-semibold">Artifact</div>
+      <div class="card-body small">
+        {% if artifact.exists %}
+          <div class="mb-1"><span class="text-muted">File:</span> {{ artifact.path }}</div>
+          <div class="mb-1"><span class="text-muted">Size:</span> {{ artifact.size_mb }}&nbsp;MB</div>
+          <div class="mb-0"><span class="text-muted">Saved:</span> {{ artifact.mtime }}</div>
+        {% else %}
+          <p class="text-muted mb-0">No artifact yet — produced automatically after training completes.</p>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+
     <!-- SFT settings -->
     <div class="card border-secondary">
       <div class="card-header d-flex align-items-center">

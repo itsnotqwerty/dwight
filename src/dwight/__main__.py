@@ -221,5 +221,75 @@ def train(
     )
 
 
+@cli.command("export")
+@click.option(
+    "--model",
+    "model_id",
+    type=click.Choice(list(MODEL_REGISTRY)),
+    default="tiny",
+    show_default=True,
+    help="Model architecture to export.",
+)
+@click.option(
+    "--checkpoint",
+    default=None,
+    help="Path to checkpoint (.pt).  Defaults to the model's registry checkpoint path.",
+)
+@click.option(
+    "--output",
+    default=None,
+    help="Output artifact path (.lzma).  Defaults to the model's registry artifact_path.",
+)
+@click.option(
+    "--group-size",
+    default=512,
+    show_default=True,
+    type=int,
+    help="Quantization group size (larger = smaller artifact, lower quality).",
+)
+def export(
+    model_id: str,
+    checkpoint: str | None,
+    output: str | None,
+    group_size: int,
+) -> None:
+    """Compress a model checkpoint into a small LZMA artifact for fast loading."""
+    import os
+    import torch
+    from dwight.model.registry import get_model_entry
+    from dwight.model.tiny.quantize import save_artifact
+
+    entry = get_model_entry(model_id)
+
+    checkpoint_path = checkpoint or entry.checkpoint_path
+    output_path = output or entry.artifact_path
+    if output_path is None:
+        raise click.ClickException(
+            f"Model {model_id!r} has no artifact_path in the registry; "
+            "provide --output explicitly."
+        )
+
+    if not os.path.exists(checkpoint_path):
+        raise click.ClickException(f"Checkpoint not found: {checkpoint_path}")
+
+    device = torch.device("cpu")
+    config = entry.config_cls()
+    model = entry.model_cls(config)
+
+    ckpt = torch.load(checkpoint_path, weights_only=False, map_location=device)
+    state_dict = (
+        ckpt["model_state_dict"]
+        if isinstance(ckpt, dict) and "model_state_dict" in ckpt
+        else ckpt
+    )
+    model.load_state_dict(state_dict, strict=False)
+
+    click.echo(f"Exporting {model_id} → {output_path} (group_size={group_size}) …")
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    save_artifact(model, output_path, group_size=group_size)
+    size_mb = os.path.getsize(output_path) / 1_048_576
+    click.echo(f"Done — {size_mb:.1f} MB")
+
+
 if __name__ == "__main__":
     cli()

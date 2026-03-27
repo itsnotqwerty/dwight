@@ -11,9 +11,12 @@ import torch
 from dwight.tokenizer import TiktokenWrapper
 from dwight.training.dataset import chan_dataloader
 from dwight.training.train import (
+    _apply_scheduled_lr,
+    _cleanup_after_cuda_oom,
     _cosine_decay_lr,
     _min_training_seq_len,
     _maybe_offload_auxiliary_state,
+    _next_step_checkpoint,
     _training_batch_size,
     _training_grad_accum_steps,
     _training_uses_gradient_checkpointing,
@@ -61,6 +64,32 @@ def test_lr_is_monotone_in_warmup():
         for s in range(50)
     ]
     assert all(lrs[i] <= lrs[i + 1] for i in range(len(lrs) - 1))
+
+
+def test_next_step_checkpoint_uses_next_interval_boundary():
+    assert _next_step_checkpoint(0, 10_000) == 10_000
+    assert _next_step_checkpoint(9_999, 10_000) == 10_000
+    assert _next_step_checkpoint(10_000, 10_000) == 20_000
+
+
+def test_apply_scheduled_lr_scales_each_group_from_its_base_lr():
+    layer = torch.nn.Linear(4, 4)
+    optimizer = torch.optim.SGD(
+        [
+            {"params": [layer.weight], "lr": 0.4},
+            {"params": [layer.bias], "lr": 0.1},
+        ]
+    )
+
+    _apply_scheduled_lr(optimizer, scheduled_lr=0.2, max_lr=0.4)
+
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.2)
+    assert optimizer.param_groups[1]["lr"] == pytest.approx(0.05)
+
+    _apply_scheduled_lr(optimizer, scheduled_lr=0.1, max_lr=0.4)
+
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.1)
+    assert optimizer.param_groups[1]["lr"] == pytest.approx(0.025)
 
 
 def test_training_seq_len_uses_tiny_runtime_default():
@@ -149,6 +178,15 @@ def test_chan_dataloader_returns_dataloader(tokenizer):
     assert isinstance(ds, DataLoader)
 
 
+def test_chan_dataloader_disables_multiprocessing_workers(tokenizer):
+    with patch(
+        "dwight.training.dataset._iter_post_texts", return_value=iter(_FAKE_POSTS)
+    ):
+        ds = chan_dataloader("fake.tar.zst", tokenizer, seq_len=8, batch_size=2)
+
+    assert ds.num_workers == 0
+
+
 def test_maybe_offload_auxiliary_state_calls_model_hook():
     class DummyModel(torch.nn.Module):
         def __init__(self):
@@ -161,3 +199,36 @@ def test_maybe_offload_auxiliary_state_calls_model_hook():
     model = DummyModel()
     _maybe_offload_auxiliary_state(model)
     assert model.called is True
+
+
+def test_cleanup_after_cuda_oom_zeroes_grads_and_offloads_aux_state(monkeypatch):
+    class DummyOptimizer:
+        def __init__(self):
+            self.zero_grad_called = False
+
+        def zero_grad(self, *, set_to_none: bool = True) -> None:
+            self.zero_grad_called = set_to_none
+
+    class DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.offloaded = False
+
+        def offload_auxiliary_state_to_cpu(self) -> None:
+            self.offloaded = True
+
+    emptied = False
+
+    def fake_empty_cache() -> None:
+        nonlocal emptied
+        emptied = True
+
+    optimizer = DummyOptimizer()
+    model = DummyModel()
+    monkeypatch.setattr(torch.cuda, "empty_cache", fake_empty_cache)
+
+    _cleanup_after_cuda_oom(optimizer, model)
+
+    assert optimizer.zero_grad_called is True
+    assert model.offloaded is True
+    assert emptied is True

@@ -39,9 +39,19 @@ class ParameterBank:
         for param in self.parameters:
             rows = param.shape[0]
             flat = param.data.view(rows, -1)
-            gram = flat @ flat.transpose(0, 1)
-            inv_sqrt = newton_schulz5(gram.float()).squeeze(0).to(flat.dtype)
-            param.data.copy_((inv_sqrt @ flat).view_as(param.data))
+            flat_cpu = flat.detach().to(device="cpu", dtype=torch.float32)
+            cols = flat_cpu.shape[1]
+            if rows <= cols:
+                gram = flat_cpu @ flat_cpu.transpose(0, 1)
+                inv_sqrt = newton_schulz5(gram).squeeze(0)
+                orthogonalized = inv_sqrt @ flat_cpu
+            else:
+                gram = flat_cpu.transpose(0, 1) @ flat_cpu
+                inv_sqrt = newton_schulz5(gram).squeeze(0)
+                orthogonalized = flat_cpu @ inv_sqrt
+            param.data.copy_(
+                orthogonalized.to(device=flat.device, dtype=flat.dtype).view_as(param.data)
+            )
 
 
 class ParallelMuon:
@@ -114,6 +124,7 @@ class ParallelMuon:
 
     def step(self) -> None:
         self.matrix_optimizer.step()
+        self.bank.orthogonalize_()
         self.scalar_optimizer.step()
 
     def state_dict(self) -> dict:
