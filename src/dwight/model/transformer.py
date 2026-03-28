@@ -26,7 +26,19 @@ class GPTModel(nn.Module):
         self.blocks = nn.ModuleList(
             [
                 TransformerBlock(
-                    config.d_model, config.num_heads, config.dff, config.dropout
+                    config.d_model,
+                    config.num_heads,
+                    config.dff,
+                    config.dropout,
+                    use_mla=config.use_mla,
+                    kv_latent_dim=config.kv_latent_dim,
+                    q_latent_dim=config.q_latent_dim,
+                    qk_rope_dim=config.qk_rope_dim,
+                    use_moe=config.use_moe,
+                    num_experts=config.num_experts,
+                    num_active_experts=config.num_active_experts,
+                    num_shared_experts=config.num_shared_experts,
+                    expert_hidden_dim=config.expert_hidden_dim,
                 )
                 for _ in range(config.num_layers)
             ]
@@ -35,11 +47,13 @@ class GPTModel(nn.Module):
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
         head_dim = config.d_model // config.num_heads
+        # For MLA use qk_rope_dim as the rope dimension; for standard MHA use head_dim.
+        rope_dim = config.qk_rope_dim if config.use_mla else head_dim
         # Precomputed RoPE frequencies — registered as a non-parameter buffer so
         # they travel with the model to GPU and are excluded from optimizer state.
         self.register_buffer(
             "freqs",
-            precompute_freqs(head_dim, config.max_seq_len),
+            precompute_freqs(rope_dim, config.max_seq_len),
             persistent=False,
         )
 
@@ -65,28 +79,31 @@ class GPTModel(nn.Module):
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass.
 
         Args:
             x: int64 tensor of shape (batch, seq_len).
 
         Returns:
-            Logits of shape (batch, seq_len, vocab_size).
+            (logits, aux_loss) where logits is (batch, seq_len, vocab_size) and
+            aux_loss is a scalar MoE load-balance loss (zero when use_moe=False).
         """
         B, T = x.shape
 
         h = self.emb_drop(self.token_embedding(x))  # (B, T, d_model)
 
         freqs = self.freqs[:T]  # slice to current sequence length
+        total_aux = h.new_zeros(())  # scalar accumulator for MoE aux losses
         for block in self.blocks:
             if self._gradient_checkpointing and self.training:
-                h = _ckpt(block, h, freqs, use_reentrant=False)
+                h, aux = _ckpt(block, h, freqs, use_reentrant=False)
             else:
-                h = block(h, freqs)
+                h, aux = block(h, freqs)
+            total_aux = total_aux + aux
 
         h = self.ln_f(h)
-        return self.lm_head(h)  # (B, T, vocab_size)
+        return self.lm_head(h), total_aux  # (B, T, vocab_size), scalar
 
     def enable_gradient_checkpointing(self) -> None:
         """Recompute activations during backward to reduce peak VRAM usage."""
@@ -111,7 +128,7 @@ class GPTModel(nn.Module):
             for _ in range(max_new_tokens):
                 context = ids[-self.config.max_seq_len :]
                 ctx = torch.tensor([context], dtype=torch.long, device=device)  # (1, T)
-                logits = self(ctx)  # (1, T, vocab_size)
+                logits, _ = self(ctx)  # (1, T, vocab_size) — discard aux_loss
                 last_logits = logits[0, -1].float().cpu().numpy().astype(np.float64)
 
                 if temperature <= 0.0:

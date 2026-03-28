@@ -21,8 +21,26 @@ class ModelEntry:
 
 
 MODEL_REGISTRY: dict[str, ModelEntry] = {
+    # Default architecture: MLA + MoE (use_mla=True, use_moe=True by default)
     "dwight": ModelEntry(
         GPTModel, ModelConfig, os.path.join("checkpoints", "model.pt")
+    ),
+    # Individual feature variants
+    "dwight-moe": ModelEntry(
+        GPTModel,
+        lambda: ModelConfig(use_mla=False, use_moe=True),  # type: ignore
+        os.path.join("checkpoints", "dwight_moe.pt"),
+    ),
+    "dwight-mla": ModelEntry(
+        GPTModel,
+        lambda: ModelConfig(use_mla=True, use_moe=False),  # type: ignore
+        os.path.join("checkpoints", "dwight_mla.pt"),
+    ),
+    # Original dense MHA + SwiGLU FFN (no MLA, no MoE)
+    "dwight-dense": ModelEntry(
+        GPTModel,
+        lambda: ModelConfig(use_mla=False, use_moe=False),  # type: ignore
+        os.path.join("checkpoints", "dwight_dense.pt"),
     ),
     "tiny": ModelEntry(
         TinyModel,

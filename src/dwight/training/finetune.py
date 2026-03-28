@@ -132,7 +132,8 @@ def sft_finetune(
                     tgt = tgt.to(device)
 
                     with torch.autocast(device_type=device.type, **autocast_kwargs):
-                        logits = model(inp)
+                        output = model(inp)
+                        logits = output[0] if isinstance(output, tuple) else output
                         loss = F.cross_entropy(
                             logits.view(-1, config.vocab_size),
                             tgt.view(-1),
@@ -296,7 +297,8 @@ def rlhf_step(
         tgt = torch.tensor(full_ids[1:], dtype=torch.long, device=device)
 
         with torch.autocast(device_type=device.type, **_autocast_kwargs(device)):
-            logits = model(inp)  # (1, T, vocab_size)
+            output = model(inp)  # (1, T, vocab_size) or ((1, T, vocab_size), aux)
+            logits = output[0] if isinstance(output, tuple) else output
 
         # Only measure log-prob over the completion tokens (not the prompt)
         comp_logits = logits[0, prompt_len - 1 :].float()  # (comp_len, vocab_size)

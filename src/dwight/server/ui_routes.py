@@ -355,6 +355,28 @@ async def _stream_training_output(app) -> None:
             if decoded:
                 app.state.training_log_lines.append(decoded)
         await process.wait()
+        # Reload the model from the freshly-written checkpoint so that
+        # subsequent inference uses the trained weights, not the stale
+        # in-memory weights from server startup.
+        if process.returncode == 0:
+            try:
+                device = getattr(
+                    app.state,
+                    "device",
+                    torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+                )
+                model_id = getattr(app.state, "active_model_id", "dwight")
+                model, config, checkpoint_path = load_model(model_id, device)
+                app.state.model = model
+                app.state.model_config = config
+                app.state.active_checkpoint_path = checkpoint_path
+                app.state.training_log_lines.append(
+                    f"[server] Reloaded model weights from {checkpoint_path}."
+                )
+            except Exception as exc:
+                app.state.training_log_lines.append(
+                    f"[server] Warning: could not reload model after training: {exc}"
+                )
 
 
 @ui_router.get("/ui/train/logs")

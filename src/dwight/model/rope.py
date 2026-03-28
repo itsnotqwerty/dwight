@@ -5,14 +5,17 @@ from __future__ import annotations
 import torch
 
 
-def precompute_freqs(head_dim: int, max_seq_len: int) -> torch.Tensor:
-    """Return complex frequency tensor of shape (max_seq_len, head_dim // 2).
+def precompute_freqs(dim: int, max_seq_len: int) -> torch.Tensor:
+    """Return complex frequency tensor of shape (max_seq_len, dim // 2).
 
     Each position gets a vector of complex numbers ``e^{i * m * theta_k}``
-    where ``theta_k = 10000^{-2k/head_dim}`` following the original RoPE paper.
+    where ``theta_k = 10000^{-2k/dim}`` following the original RoPE paper.
+
+    *dim* is the number of dimensions to rotate (e.g. ``head_dim`` for standard
+    RoPE, or ``qk_rope_dim`` for MLA's decoupled RoPE).
     """
-    assert head_dim % 2 == 0, "head_dim must be even for RoPE"
-    half = head_dim // 2
+    assert dim % 2 == 0, "dim must be even for RoPE"
+    half = dim // 2
     # theta_k for k in [0, half)
     theta = 1.0 / (10_000.0 ** (torch.arange(0, half, dtype=torch.float32) / half))
     positions = torch.arange(max_seq_len, dtype=torch.float32)

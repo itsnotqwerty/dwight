@@ -270,13 +270,19 @@ def train(
                     tgt = tgt.to(device)
 
                     with torch.autocast(device_type=device.type, **autocast_kwargs):
-                        logits = model(inp)
-                        loss = F.cross_entropy(
+                        output = model(inp)
+                        if isinstance(output, tuple):
+                            logits, aux_loss = output
+                        else:
+                            logits, aux_loss = output, 0.0
+                        ce_loss = F.cross_entropy(
                             logits.view(-1, config.vocab_size),
                             tgt.view(-1),
                         )
+                        moe_coeff = float(getattr(config, "moe_aux_loss_coeff", 0.0))
+                        loss = ce_loss + moe_coeff * aux_loss
                     (loss / grad_accum_steps).backward()
-                    accum_loss += loss.item()
+                    accum_loss += ce_loss.item()
                     micro_step += 1
 
                     if micro_step % grad_accum_steps != 0:

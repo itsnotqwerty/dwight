@@ -87,15 +87,17 @@ def test_ffn_preserves_dtype():
 def test_block_output_shape():
     block = TransformerBlock(d_model=D_MODEL, num_heads=HEADS, dff=DFF)
     x = _float_input()
-    out = block(x, _freqs())
+    out, aux = block(x, _freqs())
     assert out.shape == (BATCH, SEQ, D_MODEL)
+    assert aux.item() == 0.0  # no MoE → zero aux loss
 
 
 def test_block_residual_connection():
     """Output should not equal input (weights are random, so the FFN adds info)."""
     block = TransformerBlock(d_model=D_MODEL, num_heads=HEADS, dff=DFF, dropout=0.0)
     x = _float_input()
-    out = block(x, _freqs()).detach().numpy()
+    out, _ = block(x, _freqs())
+    out = out.detach().numpy()
     assert not np.allclose(out, x.numpy(), atol=1e-4)
 
 
@@ -105,21 +107,22 @@ def test_block_residual_connection():
 def test_gptmodel_output_shape(tiny_model, tiny_config):
     x = _token_input(batch=2, seq=tiny_config.max_seq_len // 2)
     with torch.no_grad():
-        logits = tiny_model(x)
+        logits, aux = tiny_model(x)
     assert logits.shape == (*x.shape, tiny_config.vocab_size)
+    assert aux.item() == 0.0
 
 
 def test_gptmodel_single_token(tiny_model, tiny_config):
     x = _token_input(batch=1, seq=1)
     with torch.no_grad():
-        logits = tiny_model(x)
+        logits, _ = tiny_model(x)
     assert logits.shape == (1, 1, tiny_config.vocab_size)
 
 
 def test_gptmodel_max_seq_len(tiny_model, tiny_config):
     x = _token_input(batch=1, seq=tiny_config.max_seq_len)
     with torch.no_grad():
-        logits = tiny_model(x)
+        logits, _ = tiny_model(x)
     assert logits.shape == (1, tiny_config.max_seq_len, tiny_config.vocab_size)
 
 
