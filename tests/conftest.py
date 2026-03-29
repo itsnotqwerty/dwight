@@ -10,7 +10,9 @@ from dwight.model.tiny import TinyModel, TinyModelConfig
 from dwight.model.transformer import GPTModel
 from dwight.tokenizer import TiktokenWrapper
 
-# A tiny config so model tests run quickly
+# A tiny config so model tests run quickly.
+# MoE and MLA are intentionally disabled here; tests that want those
+# features construct their own configs (see test_mla.py, test_moe.py).
 TINY = ModelConfig(
     num_layers=1,
     d_model=32,
@@ -19,6 +21,8 @@ TINY = ModelConfig(
     vocab_size=100_277,
     max_seq_len=16,
     dropout=0.0,
+    use_mla=False,
+    use_moe=False,
 )
 
 TINY_ARCH = TinyModelConfig(

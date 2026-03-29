@@ -140,6 +140,7 @@ def mla_config() -> ModelConfig:
         max_seq_len=16,
         dropout=0.0,
         use_mla=True,
+        use_moe=False,  # MLA-only; MoE aux loss tested separately in test_moe.py
         kv_latent_dim=KV_LATENT,
         q_latent_dim=Q_LATENT,
         qk_rope_dim=QK_ROPE,

@@ -11,7 +11,7 @@ load_dotenv()  # Load .env from the working directory (no-op if absent); env var
 from dwight.model.registry import MODEL_REGISTRY, load_model
 from dwight.model.tiny import TinyModel
 from dwight.model.transformer import GPTModel
-from dwight.training.dataset import DEFAULT_ARCHIVE
+from dwight.training.dataset import DEFAULT_ARCHIVE, DEFAULT_PROMPTS
 
 
 @click.group(invoke_without_command=True)
@@ -185,6 +185,54 @@ def predict(
     help="Accumulate gradients over N micro-batches before each optimizer step. Defaults to the selected model's training config.",
 )
 @click.option(
+    "--auto-stop/--no-auto-stop",
+    default=True,
+    show_default=True,
+    help="Checkpoint and halt if rolling loss regresses sharply or becomes non-finite.",
+)
+@click.option(
+    "--auto-stop-window",
+    default=50,
+    show_default=True,
+    type=int,
+    help="Rolling-loss window size for the auto-stop heuristic.",
+)
+@click.option(
+    "--auto-stop-ratio",
+    default=1.6,
+    show_default=True,
+    type=float,
+    help="Stop when rolling loss exceeds the best rolling window by at least this ratio.",
+)
+@click.option(
+    "--auto-stop-patience",
+    default=5,
+    show_default=True,
+    type=int,
+    help="Number of consecutive violating checks before training halts.",
+)
+@click.option(
+    "--auto-stop-min-steps",
+    default=500,
+    show_default=True,
+    type=int,
+    help="Do not evaluate auto-stop until at least this many optimizer steps have completed.",
+)
+@click.option(
+    "--auto-stop-min-delta",
+    default=0.75,
+    show_default=True,
+    type=float,
+    help="Minimum absolute rolling-loss increase required before auto-stop can fire.",
+)
+@click.option(
+    "--auto-stop-post-resume-steps",
+    default=50,
+    show_default=True,
+    type=int,
+    help="Suppress auto-stop violation counting for N steps after restoring state on resume.",
+)
+@click.option(
     "--model",
     "model_id",
     type=click.Choice(list(MODEL_REGISTRY)),
@@ -202,6 +250,13 @@ def train(
     data: str,
     resume: bool,
     grad_accum_steps: int | None,
+    auto_stop: bool,
+    auto_stop_window: int,
+    auto_stop_ratio: float,
+    auto_stop_patience: int,
+    auto_stop_min_steps: int,
+    auto_stop_min_delta: float,
+    auto_stop_post_resume_steps: int,
     model_id: str,
 ) -> None:
     """Train the transformer on the 4chan /pol/ archive."""
@@ -218,6 +273,13 @@ def train(
         resume=resume,
         grad_accum_steps=grad_accum_steps,
         model_id=model_id,
+        auto_stop=auto_stop,
+        auto_stop_window=auto_stop_window,
+        auto_stop_ratio=auto_stop_ratio,
+        auto_stop_patience=auto_stop_patience,
+        auto_stop_min_steps=auto_stop_min_steps,
+        auto_stop_min_delta=auto_stop_min_delta,
+        auto_stop_post_resume_steps=auto_stop_post_resume_steps,
     )
 
 
@@ -289,6 +351,39 @@ def export(
     save_artifact(model, output_path, group_size=group_size)
     size_mb = os.path.getsize(output_path) / 1_048_576
     click.echo(f"Done — {size_mb:.1f} MB")
+
+
+@cli.command("generate-prompts")
+@click.option(
+    "--count",
+    default=9000,
+    show_default=True,
+    type=int,
+    help="Number of prompt-response examples to generate.",
+)
+@click.option(
+    "--seed",
+    default=42,
+    show_default=True,
+    type=int,
+    help="Random seed.",
+)
+@click.option(
+    "--output",
+    default=DEFAULT_PROMPTS,
+    show_default=True,
+    help="Output Markdown file for generated prompts.",
+)
+def generate_prompts(count: int, seed: int, output: str) -> None:
+    """Generate a synthetic prompt corpus for structured SFT."""
+    from dwight.training.generate_prompts import (
+        generate_prompt_examples,
+        write_prompt_examples,
+    )
+
+    examples = generate_prompt_examples(count=count, seed=seed)
+    path = write_prompt_examples(examples, output)
+    click.echo(f"Wrote {len(examples)} prompt examples to {path}")
 
 
 if __name__ == "__main__":

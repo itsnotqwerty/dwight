@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint as _ckpt
+from typing import cast
 
 from ..config import ModelConfig
 from .rope import precompute_freqs
@@ -72,6 +73,14 @@ class GPTModel(nn.Module):
             if module is self.lm_head or any(
                 module is getattr(blk.attn, "out_proj", None)
                 or module is getattr(blk.ffn, "down_proj", None)
+                or any(
+                    module is expert.down_proj
+                    for expert_list in (
+                        getattr(blk.ffn, "experts", []),
+                        getattr(blk.ffn, "shared_experts", []),
+                    )
+                    for expert in expert_list
+                )
                 for blk in self.blocks
             ):
                 std /= (2 * self.config.num_layers) ** 0.5
@@ -93,11 +102,14 @@ class GPTModel(nn.Module):
 
         h = self.emb_drop(self.token_embedding(x))  # (B, T, d_model)
 
-        freqs = self.freqs[:T]  # slice to current sequence length
+        freqs = cast(torch.Tensor, self.freqs)[:T]  # slice to current sequence length
         total_aux = h.new_zeros(())  # scalar accumulator for MoE aux losses
         for block in self.blocks:
             if self._gradient_checkpointing and self.training:
-                h, aux = _ckpt(block, h, freqs, use_reentrant=False)
+                h, aux = cast(
+                    tuple[torch.Tensor, torch.Tensor],
+                    _ckpt(block, h, freqs, use_reentrant=False),
+                )
             else:
                 h, aux = block(h, freqs)
             total_aux = total_aux + aux

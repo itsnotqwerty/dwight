@@ -76,12 +76,12 @@ def load_model(
     # re-exported), fall through to the checkpoint so stale artifacts are ignored.
     prefer_artifact = artifact_exists and (
         not checkpoint_exists
-        or os.path.getmtime(artifact_path) >= os.path.getmtime(checkpoint_path)
+        or os.path.getmtime(artifact_path) >= os.path.getmtime(checkpoint_path)  # type: ignore
     )
 
     if prefer_artifact:
         try:
-            load_artifact(model, artifact_path)
+            load_artifact(model, artifact_path)  # type: ignore
             print(f"Loaded artifact from {artifact_path} (device: {device})")
             model.to(device)
             model.eval()

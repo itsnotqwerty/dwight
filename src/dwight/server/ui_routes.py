@@ -587,7 +587,7 @@ async def tune_rlhf_generate(
         )
 
     completions: list[str] = []
-    for _ in range(body.n):
+    for _ in range(body.n):  # type: ignore
         text = await loop.run_in_executor(None, _generate_one)
         completions.append(text)
 

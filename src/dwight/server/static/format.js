@@ -53,25 +53,94 @@
     return escaped;
   }
 
+  // Words whose inner letters are replaced with '*' when censoring is on.
+  // Checked case-insensitively against whole words only.
+  const BLACKLIST = new Set([
+    'nigger', 'nigga',
+    'fag',
+    'kike',
+    'tranny', 'trannies',
+    'chink',
+    'spic',
+    'wetback',
+    'gook',
+    'cunt',
+		'cuck',
+		'retard',
+    'whore',
+    'dyke',
+  ]);
+
+  /**
+   * Censor a single word, keeping its first and last character and replacing
+   * all inner characters with asterisks.  Words of 1–2 characters are left
+   * unchanged.
+   * @param {string} word  Original word (mixed case OK)
+   * @returns {string}
+   */
+  function _censorWord(word) {
+    if (word.length <= 2) return word;
+    return word[0] + '*'.repeat(word.length - 2) + word[word.length - 1];
+  }
+
+  /**
+   * Censor blacklisted words inside an HTML string, leaving tag markup
+   * completely untouched.  The alternation `(<[^>]+>)|(\b[A-Za-z]+\b)`
+   * means every match is either:
+   *   - An HTML tag  → returned as-is (first capture group)
+   *   - A plain word → censored if blacklisted (second capture group)
+   *
+   * This must be called AFTER markdown rendering so that the asterisks
+   * inserted by `_censorWord` are never seen by the markdown processor
+   * and cannot accidentally trigger bold/italic formatting.
+   *
+   * @param {string} html  HTML string (output of applyInlineMarkdown)
+   * @returns {string}     HTML string with blacklisted words censored
+   */
+  /**
+   * Return true if any blacklisted term appears anywhere inside *word*.
+   * @param {string} word  lower-cased word
+   * @returns {boolean}
+   */
+  function _isBlacklisted(word) {
+    for (const term of BLACKLIST) {
+      if (word.includes(term)) return true;
+    }
+    return false;
+  }
+
+  function censorText(html) {
+    return html.replace(/(<[^>]*>)|([A-Za-z]+)/g, function (match, tag, word) {
+      if (tag !== undefined) return tag;  // HTML tag — pass through unchanged
+      return _isBlacklisted(word.toLowerCase()) ? _censorWord(word) : word;
+    });
+  }
+
   /**
    * Convert a plain text string into formatted HTML.
-   * - Escapes HTML entities first
-   * - Wraps '>' lines in a greentext span
-   * - Applies inline markdown
+   * Pipeline per line:
+   *   1. HTML-escape raw text
+   *   2. Apply inline markdown  (**bold**, *italic*, `code`)
+   *   3. If censoring: replace blacklisted words (after markdown, so `*`
+   *      chars from censoring are never re-interpreted as markdown syntax)
+   *   4. Wrap greentext lines in a <span>
    *
-   * @param {string} rawText
+   * @param {string}  rawText
+   * @param {boolean} [censor=false]
    * @returns {string} HTML string safe to assign to innerHTML
    */
-  function renderText(rawText) {
+  function renderText(rawText, censor) {
     return rawText
       .split('\n')
       .map(function (line) {
         const escaped = escapeHtml(line);
+        const markdown = applyInlineMarkdown(escaped);
+        const text = censor ? censorText(markdown) : markdown;
         // Greentext: line starts with '>' (after optional whitespace)
         if (/^\s*&gt;/.test(escaped)) {
-          return '<span class="greentext">' + applyInlineMarkdown(escaped) + '</span>';
+          return '<span class="greentext">' + text + '</span>';
         }
-        return applyInlineMarkdown(escaped);
+        return text;
       })
       .join('\n');
   }
@@ -82,11 +151,12 @@
    *
    * @param {HTMLElement} el      Target element (typically a <pre>)
    * @param {string}      rawText Plain text to render
+   * @param {boolean}     [censor=false] Whether to censor blacklisted words
    */
-  function applyToElement(el, rawText) {
+  function applyToElement(el, rawText, censor) {
     el.classList.add('dwight-rendered');
-    el.innerHTML = renderText(rawText);
+    el.innerHTML = renderText(rawText, censor);
   }
 
-  global.DwightFormat = { escapeHtml, renderText, applyToElement };
+  global.DwightFormat = { escapeHtml, censorText, renderText, applyToElement };
 })(window);

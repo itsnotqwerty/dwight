@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 import pytest
 import torch
+import torch.nn as nn
 
 from dwight.config import ModelConfig
 from dwight.model.attention import MultiHeadCausalAttention
 from dwight.model.feed_forward import FeedForwardNetwork
+from dwight.model.moe import MoEFeedForward
 from dwight.model.rope import precompute_freqs
 from dwight.model.transformer import GPTModel
 from dwight.model.transformer_block import TransformerBlock
@@ -163,8 +167,58 @@ def test_generate_respects_max_seq_len(tiny_model, tiny_config):
 
 
 def test_default_model_param_count():
-    """Default config should produce ~148M parameters (weight-tied embeddings)."""
+    """Default config (MLA + MoE) should produce roughly 200–260M parameters."""
     model = GPTModel(ModelConfig())
     total = sum(p.numel() for p in model.parameters())
-    assert total > 130_000_000, f"Expected >130M params, got {total:,}"
-    assert total < 170_000_000, f"Expected <170M params, got {total:,}"
+    assert total > 200_000_000, f"Expected >200M params, got {total:,}"
+    assert total < 260_000_000, f"Expected <260M params, got {total:,}"
+
+
+def test_moe_expert_down_proj_uses_residual_scaling():
+    config = ModelConfig(
+        num_layers=4,
+        d_model=32,
+        num_heads=2,
+        dff=64,
+        vocab_size=1024,
+        max_seq_len=16,
+        dropout=0.0,
+        use_mla=False,
+        use_moe=True,
+        num_experts=2,
+        num_active_experts=1,
+        num_shared_experts=1,
+        expert_hidden_dim=32,
+    )
+    model = GPTModel(config)
+    dense_model = GPTModel(
+        ModelConfig(
+            num_layers=4,
+            d_model=32,
+            num_heads=2,
+            dff=64,
+            vocab_size=1024,
+            max_seq_len=16,
+            dropout=0.0,
+            use_mla=False,
+            use_moe=False,
+        )
+    )
+
+    moe_ffn = cast(MoEFeedForward, cast(TransformerBlock, model.blocks[0]).ffn)
+    dense_ffn = cast(
+        FeedForwardNetwork,
+        cast(TransformerBlock, dense_model.blocks[0]).ffn,
+    )
+    expert_down_proj = cast(nn.Linear, getattr(moe_ffn.experts[0], "down_proj"))
+    shared_down_proj = cast(
+        nn.Linear,
+        getattr(moe_ffn.shared_experts[0], "down_proj"),
+    )
+
+    expert_std = expert_down_proj.weight.std().item()
+    shared_std = shared_down_proj.weight.std().item()
+    dense_std = dense_ffn.down_proj.weight.std().item()
+
+    assert expert_std == pytest.approx(dense_std, rel=0.35)
+    assert shared_std == pytest.approx(dense_std, rel=0.35)

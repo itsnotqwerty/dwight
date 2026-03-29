@@ -19,7 +19,12 @@ import torch.nn.functional as F
 from ..config import ModelConfig
 from ..model.transformer import GPTModel
 from ..tokenizer import TiktokenWrapper
-from .dataset import DEFAULT_CORPUS, corpus_dataloader
+from .dataset import (
+    DEFAULT_CORPUS,
+    DEFAULT_PROMPTS,
+    corpus_dataloader,
+    prompt_dataloader,
+)
 
 _CHECKPOINT_PATH = os.path.join("checkpoints", "model.pt")
 
@@ -50,6 +55,7 @@ def sft_finetune(
     config: ModelConfig,
     *,
     corpus_path: str = DEFAULT_CORPUS,
+    prompts_path: str | None = None,
     epochs: int = 1,
     batch_size: int = 4,
     lr: float = 1e-4,
@@ -71,6 +77,10 @@ def sft_finetune(
         Model configuration (needed for ``vocab_size``).
     corpus_path:
         Path to the plain-text / Markdown corpus file.
+    prompts_path:
+        Optional path to a structured prompt corpus using ``[SYSTEM]``,
+        ``[USER]``, and ``[ASSISTANT]`` blocks. If omitted, prompt files are
+        auto-detected from ``corpus_path`` when they contain those markers.
     epochs:
         Number of passes over the corpus.
     batch_size:
@@ -102,15 +112,33 @@ def sft_finetune(
     interrupted = False
     current_batch_size = batch_size
     current_seq_len = config.max_seq_len
+    active_prompt_path = Path(prompts_path) if prompts_path is not None else None
+
+    def _looks_like_prompt_corpus(path: Path) -> bool:
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                head = fh.read(4096)
+        except OSError:
+            return False
+        return all(marker in head for marker in ("[SYSTEM]", "[USER]", "[ASSISTANT]"))
 
     for epoch in range(1, epochs + 1):
         while True:
-            loader = corpus_dataloader(
-                corpus_path,
-                tokenizer,
-                seq_len=current_seq_len,
-                batch_size=current_batch_size,
-            )
+            dataset_path = active_prompt_path or Path(corpus_path)
+            if prompts_path is not None or _looks_like_prompt_corpus(dataset_path):
+                loader = prompt_dataloader(
+                    dataset_path,
+                    tokenizer,
+                    seq_len=current_seq_len,
+                    batch_size=current_batch_size,
+                )
+            else:
+                loader = corpus_dataloader(
+                    corpus_path,
+                    tokenizer,
+                    seq_len=current_seq_len,
+                    batch_size=current_batch_size,
+                )
             model.train()
             running_loss = 0.0
             n_batches = 0

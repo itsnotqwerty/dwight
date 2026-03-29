@@ -46,6 +46,7 @@ python -m dwight serve --reload           # auto-reload on source changes
 python -m dwight train                    # 3 epochs, batch size 8
 python -m dwight train --epochs 10 --batch-size 16 --max-lr 1e-4
 python -m dwight train --max-steps 50    # quick smoke-test (stops after 50 steps)
+python -m dwight train --no-auto-stop    # disable rolling-loss auto-stop safeguard
 ```
 
 Weights are saved to `checkpoints/model.pt` after each epoch. The server loads them automatically on startup if the file exists.
@@ -60,6 +61,13 @@ Training options:
 | `--warmup-steps` | 100 | Steps of linear LR warmup |
 | `--checkpoint-dir` | `checkpoints` | Directory for saved weights |
 | `--max-steps` | — | Hard stop after N gradient steps |
+| `--auto-stop / --no-auto-stop` | `--auto-stop` | Halt and checkpoint when rolling loss regresses sharply or becomes non-finite |
+| `--auto-stop-window` | 50 | Rolling window size for the auto-stop loss heuristic |
+| `--auto-stop-ratio` | 1.6 | Relative loss increase over the best rolling window required to trigger auto-stop |
+| `--auto-stop-patience` | 5 | Consecutive violating checks required before auto-stop halts training |
+| `--auto-stop-min-steps` | 500 | Ignore the auto-stop heuristic until this many optimizer steps have completed |
+| `--auto-stop-min-delta` | 0.75 | Minimum absolute rolling-loss increase required before auto-stop can fire |
+| `--auto-stop-post-resume-steps` | 50 | Suppress auto-stop violation counting for N steps after restoring state on resume |
 
 ### Predict (feed-forward completion)
 

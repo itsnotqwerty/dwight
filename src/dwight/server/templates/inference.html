@@ -49,6 +49,11 @@
           <button id="btn-stop"     class="btn btn-outline-danger" disabled>Stop</button>
         </div>
 
+        <div class="form-check form-switch mt-3">
+          <input class="form-check-input" type="checkbox" id="censor-toggle" checked>
+          <label class="form-check-label text-muted" for="censor-toggle">Censor offensive words</label>
+        </div>
+
       </div>
     </div>
   </div>
@@ -80,6 +85,7 @@
   const btnGen    = document.getElementById('btn-generate');
   const btnStop   = document.getElementById('btn-stop');
   const badge     = document.getElementById('status-badge');
+  const censorEl  = document.getElementById('censor-toggle');
 
   // Sync range slider labels
   [['max-tokens', v => v], ['temperature', v => parseFloat(v).toFixed(2)], ['top-p', v => parseFloat(v).toFixed(2)]].forEach(([id, fmt]) => {
@@ -120,15 +126,16 @@
 
     evtSource.onmessage = (e) => {
       const d = JSON.parse(e.data);
+      const censor = censorEl.checked;
       if (d.done) {
         evtSource.close();
         evtSource = null;
-        DwightFormat.applyToElement(outputEl, outputBuffer);
+        DwightFormat.applyToElement(outputEl, outputBuffer, censor);
         outputEl.scrollTop = outputEl.scrollHeight;
         setGenerating(false);
       } else if (d.token !== undefined) {
         outputBuffer += d.token;
-        DwightFormat.applyToElement(outputEl, outputBuffer);
+        DwightFormat.applyToElement(outputEl, outputBuffer, censor);
         outputEl.scrollTop = outputEl.scrollHeight;
       }
     };
@@ -144,6 +151,13 @@
   btnStop.addEventListener('click', () => {
     if (evtSource) { evtSource.close(); evtSource = null; }
     setGenerating(false);
+  });
+
+  // Re-render existing output immediately when the censor toggle changes
+  censorEl.addEventListener('change', () => {
+    if (outputBuffer) {
+      DwightFormat.applyToElement(outputEl, outputBuffer, censorEl.checked);
+    }
   });
 </script>
 {% endblock %}
