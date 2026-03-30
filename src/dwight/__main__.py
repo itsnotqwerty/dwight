@@ -5,13 +5,14 @@ from __future__ import annotations
 import click
 from dotenv import load_dotenv
 from typing import cast
+from dwight.config import ModelConfig
 
 load_dotenv()  # Load .env from the working directory (no-op if absent); env vars take priority.
 
 from dwight.model.registry import MODEL_REGISTRY, load_model
 from dwight.model.tiny import TinyModel
 from dwight.model.transformer import GPTModel
-from dwight.training.dataset import DEFAULT_ARCHIVE, DEFAULT_PROMPTS
+from dwight.training.dataset import DEFAULT_ARCHIVE, DEFAULT_DPO, DEFAULT_PROMPTS
 
 
 @click.group(invoke_without_command=True)
@@ -384,6 +385,123 @@ def generate_prompts(count: int, seed: int, output: str) -> None:
     examples = generate_prompt_examples(count=count, seed=seed)
     path = write_prompt_examples(examples, output)
     click.echo(f"Wrote {len(examples)} prompt examples to {path}")
+
+
+@cli.command("generate-dpo")
+@click.option(
+    "--count",
+    default=9000,
+    show_default=True,
+    type=int,
+    help="Number of chosen/rejected examples to generate.",
+)
+@click.option(
+    "--seed",
+    default=42,
+    show_default=True,
+    type=int,
+    help="Random seed.",
+)
+@click.option(
+    "--output",
+    default=DEFAULT_DPO,
+    show_default=True,
+    help="Output Markdown file for generated DPO prompts.",
+)
+def generate_dpo(count: int, seed: int, output: str) -> None:
+    """Generate a synthetic chosen/rejected corpus for DPO."""
+    from dwight.training.generate_dpo_prompts import (
+        generate_dpo_examples,
+        write_dpo_examples,
+    )
+
+    examples = generate_dpo_examples(count=count, seed=seed)
+    path = write_dpo_examples(examples, output)
+    click.echo(f"Wrote {len(examples)} DPO examples to {path}")
+
+
+@cli.command()
+@click.option(
+    "--dpo-path",
+    default=DEFAULT_DPO,
+    show_default=True,
+    help="Path to the chosen/rejected DPO corpus.",
+)
+@click.option(
+    "--epochs", default=1, show_default=True, type=int, help="Training epochs."
+)
+@click.option(
+    "--batch-size",
+    default=None,
+    type=int,
+    help="Batch size. Defaults to the selected model's training config.",
+)
+@click.option(
+    "--lr", default=1e-5, show_default=True, type=float, help="Learning rate."
+)
+@click.option(
+    "--beta",
+    default=0.1,
+    show_default=True,
+    type=float,
+    help="DPO beta value.",
+)
+@click.option(
+    "--checkpoint-dir",
+    default="checkpoints",
+    show_default=True,
+    help="Directory to save model weights.",
+)
+@click.option(
+    "--max-steps",
+    default=None,
+    type=int,
+    help="Stop after N gradient steps (useful for quick tests).",
+)
+@click.option(
+    "--model",
+    "model_id",
+    type=click.Choice(list(MODEL_REGISTRY)),
+    default="dwight",
+    show_default=True,
+    help="Model architecture to fine-tune with DPO.",
+)
+def dpo(
+    dpo_path: str,
+    epochs: int,
+    batch_size: int | None,
+    lr: float,
+    beta: float,
+    checkpoint_dir: str,
+    max_steps: int | None,
+    model_id: str,
+) -> None:
+    """Fine-tune a model on a chosen/rejected DPO corpus."""
+    import os
+    import torch
+    from dwight.tokenizer import TiktokenWrapper
+    from dwight.training.finetune import dpo_finetune
+
+    if not os.path.exists(dpo_path):
+        raise click.ClickException(f"DPO corpus not found: {dpo_path}")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tokenizer = TiktokenWrapper()
+    loaded_model, config, _checkpoint_path = load_model(model_id, device)
+    model = cast(GPTModel | TinyModel, loaded_model)
+
+    dpo_finetune(
+        model,
+        tokenizer,
+        cast(ModelConfig, config),
+        dpo_path=dpo_path,
+        epochs=epochs,
+        batch_size=batch_size or getattr(config, "train_batch_size", 1),
+        lr=lr,
+        beta=beta,
+        max_steps=max_steps,
+        checkpoint_dir=checkpoint_dir,
+    )
 
 
 if __name__ == "__main__":

@@ -46,7 +46,7 @@ async def _lifespan(app: FastAPI):
             app.state.training_process.terminate()
         except ProcessLookupError:
             pass
-    # Signal any running SFT thread to stop
+    # Signal any running fine-tune thread to stop
     app.state.finetune_stop_event.set()
     if app.state.finetune_thread is not None and app.state.finetune_thread.is_alive():
         app.state.finetune_thread.join(timeout=5)

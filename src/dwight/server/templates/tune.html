@@ -5,7 +5,7 @@
 {% block content %}
 <div class="row g-4">
 
-  <!-- ── Left: SFT settings + checkpoint ─────────────────────────────── -->
+  <!-- ── Left: tuning settings + checkpoint ──────────────────────────── -->
   <div class="col-lg-4">
 
     <div class="card border-secondary mb-3">
@@ -56,12 +56,12 @@
     {% endif %}
 
     <!-- SFT settings -->
-    <div class="card border-secondary">
+    <div class="card border-secondary mb-3">
       <div class="card-header d-flex align-items-center">
         <span class="fw-semibold">Supervised Fine-tuning</span>
         <span id="sft-badge"
-              class="badge ms-auto {% if is_sft_running %}text-bg-success{% else %}text-bg-secondary{% endif %}">
-          {% if is_sft_running %}Running{% else %}Idle{% endif %}
+              class="badge ms-auto {% if finetune_status == 'sft' %}text-bg-success{% elif is_finetune_running %}text-bg-warning{% else %}text-bg-secondary{% endif %}">
+          {% if finetune_status == 'sft' %}Running{% elif is_finetune_running %}Busy{% else %}Idle{% endif %}
         </span>
       </div>
       <div class="card-body">
@@ -97,11 +97,11 @@
 
           <div class="col-12 d-flex gap-2 pt-1">
             <button type="submit" id="btn-sft-start" class="btn btn-sm btn-success"
-                    {% if is_sft_running %}disabled{% endif %}>
+                    {% if is_finetune_running %}disabled{% endif %}>
               Start SFT
             </button>
             <button type="button" id="btn-sft-stop" class="btn btn-sm btn-outline-danger"
-                    {% if not is_sft_running %}disabled{% endif %}>
+                    {% if finetune_status != 'sft' %}disabled{% endif %}>
               Stop
             </button>
           </div>
@@ -114,14 +114,79 @@
       </div>
     </div>
 
+    <!-- DPO settings -->
+    <div class="card border-secondary">
+      <div class="card-header d-flex align-items-center">
+        <span class="fw-semibold">Direct Preference Optimization</span>
+        <span id="dpo-badge"
+              class="badge ms-auto {% if finetune_status == 'dpo' %}text-bg-success{% elif is_finetune_running %}text-bg-warning{% else %}text-bg-secondary{% endif %}">
+          {% if finetune_status == 'dpo' %}Running{% elif is_finetune_running %}Busy{% else %}Idle{% endif %}
+        </span>
+      </div>
+      <div class="card-body">
+        <form id="dpo-form" class="row g-2">
+
+          <div class="col-12">
+            <label class="form-label">DPO file</label>
+            <input type="text" name="dpo_path" class="form-control form-control-sm font-monospace"
+                   value="{{ default_dpo }}">
+          </div>
+
+          <div class="col-6">
+            <label class="form-label">Epochs</label>
+            <input type="number" name="epochs" class="form-control form-control-sm" value="1" min="1">
+          </div>
+
+          <div class="col-6">
+            <label class="form-label">Batch size</label>
+            <input type="number" name="batch_size" class="form-control form-control-sm" value="1" min="1">
+          </div>
+
+          <div class="col-6">
+            <label class="form-label">Learning rate</label>
+            <input type="number" name="lr" class="form-control form-control-sm"
+                   value="0.00001" step="any" min="0">
+          </div>
+
+          <div class="col-6">
+            <label class="form-label">Beta</label>
+            <input type="number" name="beta" class="form-control form-control-sm"
+                   value="0.1" step="any" min="0">
+          </div>
+
+          <div class="col-12">
+            <label class="form-label">Max steps <small class="text-muted">(opt.)</small></label>
+            <input type="number" name="max_steps" class="form-control form-control-sm"
+                   placeholder="∞" min="1">
+          </div>
+
+          <div class="col-12 d-flex gap-2 pt-1">
+            <button type="submit" id="btn-dpo-start" class="btn btn-sm btn-primary"
+                    {% if is_finetune_running %}disabled{% endif %}>
+              Start DPO
+            </button>
+            <button type="button" id="btn-dpo-stop" class="btn btn-sm btn-outline-danger"
+                    {% if finetune_status != 'dpo' %}disabled{% endif %}>
+              Stop
+            </button>
+          </div>
+
+          <div class="col-12">
+            <span id="dpo-error" class="text-danger small d-none"></span>
+          </div>
+
+        </form>
+      </div>
+    </div>
+
   </div><!-- /left col -->
 
   <!-- ── Right: log + RLHF ────────────────────────────────────────────── -->
   <div class="col-lg-8">
 
-    <!-- SFT live log -->
+    <!-- Fine-tune live log -->
     <div class="card border-secondary mb-4">
-      <div class="card-header fw-semibold">SFT log</div>
+      <div class="card-header fw-semibold">Fine-tune log</div>
       <pre id="sft-log" class="live-output mb-0 rounded-0 rounded-bottom"></pre>
     </div>
 
@@ -131,7 +196,7 @@
         RLHF loop
         <span class="badge text-bg-info">REINFORCE + baseline</span>
         <span id="rlhf-sft-warning" class="text-warning small ms-auto d-none">
-          ⚠ SFT is running – wait before generating
+          ⚠ Fine-tuning is running – wait before generating
         </span>
       </div>
       <div class="card-body">
@@ -194,23 +259,37 @@
   'use strict';
 
   // ── SFT controls ──────────────────────────────────────────────────────────
-  const sftBadge   = document.getElementById('sft-badge');
+  const sftBadge    = document.getElementById('sft-badge');
+  const dpoBadge    = document.getElementById('dpo-badge');
   const btnSftStart = document.getElementById('btn-sft-start');
   const btnSftStop  = document.getElementById('btn-sft-stop');
+  const btnDpoStart = document.getElementById('btn-dpo-start');
+  const btnDpoStop  = document.getElementById('btn-dpo-stop');
   const sftLog      = document.getElementById('sft-log');
   const sftErrEl    = document.getElementById('sft-error');
+  const dpoErrEl    = document.getElementById('dpo-error');
   const rlhfWarn    = document.getElementById('rlhf-sft-warning');
   let logSrc = null;
 
-  function setSftRunning(on) {
-    btnSftStart.disabled = on;
-    btnSftStop.disabled  = !on;
-    sftBadge.textContent = on ? 'Running' : 'Idle';
-    sftBadge.className   = on
+  function setBadgeState(el, isActive, isBusy) {
+    el.textContent = isActive ? 'Running' : isBusy ? 'Busy' : 'Idle';
+    el.className = isActive
       ? 'badge ms-auto text-bg-success'
-      : 'badge ms-auto text-bg-secondary';
-    rlhfWarn.classList.toggle('d-none', !on);
-    document.getElementById('btn-generate').disabled = on;
+      : isBusy
+        ? 'badge ms-auto text-bg-warning'
+        : 'badge ms-auto text-bg-secondary';
+  }
+
+  function setFineTuneStatus(status) {
+    const running = status === 'sft' || status === 'dpo';
+    btnSftStart.disabled = running;
+    btnDpoStart.disabled = running;
+    btnSftStop.disabled  = status !== 'sft';
+    btnDpoStop.disabled  = status !== 'dpo';
+    setBadgeState(sftBadge, status === 'sft', running && status !== 'sft');
+    setBadgeState(dpoBadge, status === 'dpo', running && status !== 'dpo');
+    rlhfWarn.classList.toggle('d-none', !running);
+    document.getElementById('btn-generate').disabled = running;
   }
 
   function showSftError(msg) {
@@ -219,13 +298,19 @@
     setTimeout(() => sftErrEl.classList.add('d-none'), 6000);
   }
 
+  function showDpoError(msg) {
+    dpoErrEl.textContent = msg;
+    dpoErrEl.classList.remove('d-none');
+    setTimeout(() => dpoErrEl.classList.add('d-none'), 6000);
+  }
+
   function connectSftLogs() {
     if (logSrc && logSrc.readyState !== EventSource.CLOSED) return;
     logSrc = new EventSource('/ui/tune/logs');
     logSrc.onmessage = (e) => {
       const d = JSON.parse(e.data);
       if (d.type === 'status') {
-        setSftRunning(d.value === 'sft');
+        setFineTuneStatus(d.value);
       } else if (d.line !== undefined) {
         sftLog.textContent += d.line + '\n';
         sftLog.scrollTop = sftLog.scrollHeight;
@@ -238,6 +323,7 @@
   }
 
   connectSftLogs();
+  setFineTuneStatus('{{ finetune_status }}');
 
   document.getElementById('sft-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -259,7 +345,7 @@
     const result = await res.json();
     if (result.ok) {
       sftLog.textContent = '';
-      setSftRunning(true);
+      setFineTuneStatus('sft');
       if (logSrc) { logSrc.close(); logSrc = null; }
       connectSftLogs();
     } else {
@@ -271,6 +357,41 @@
     const res    = await fetch('/ui/tune/sft/stop', { method: 'POST' });
     const result = await res.json();
     if (!result.ok) showSftError(result.error);
+  });
+
+  document.getElementById('dpo-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const body = {
+      dpo_path:    fd.get('dpo_path').trim(),
+      epochs:      parseInt(fd.get('epochs'), 10),
+      batch_size:  parseInt(fd.get('batch_size'), 10),
+      lr:          parseFloat(fd.get('lr')),
+      beta:        parseFloat(fd.get('beta')),
+    };
+    const ms = fd.get('max_steps');
+    if (ms) body.max_steps = parseInt(ms, 10);
+
+    const res = await fetch('/ui/tune/dpo/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const result = await res.json();
+    if (result.ok) {
+      sftLog.textContent = '';
+      setFineTuneStatus('dpo');
+      if (logSrc) { logSrc.close(); logSrc = null; }
+      connectSftLogs();
+    } else {
+      showDpoError(result.error);
+    }
+  });
+
+  btnDpoStop.addEventListener('click', async () => {
+    const res    = await fetch('/ui/tune/dpo/stop', { method: 'POST' });
+    const result = await res.json();
+    if (!result.ok) showDpoError(result.error);
   });
 
   // ── RLHF controls ─────────────────────────────────────────────────────────

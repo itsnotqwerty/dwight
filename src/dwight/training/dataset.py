@@ -6,6 +6,7 @@ import html
 import json
 import re
 import tarfile
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterator
 
@@ -16,6 +17,7 @@ from torch.utils.data import DataLoader, IterableDataset
 from ..tokenizer import TiktokenWrapper
 
 DEFAULT_ARCHIVE = "data/4chan-pol.tar.zst"
+DEFAULT_DPO = "data/dpo.md"
 
 _BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -214,7 +216,7 @@ def chan_dataloader(
         # duplicate the read/decompression work and create multiprocessing
         # semaphores that can be left behind on interrupted retries.
         num_workers=0,
-        pin_memory=True,
+        pin_memory=_pin_memory_enabled(),
     )
 
 
@@ -226,25 +228,31 @@ DEFAULT_CORPUS = "data/corpus.md"
 DEFAULT_PROMPTS = "data/prompts.md"
 
 
-def _parse_prompt_pairs(prompt_path: str | Path) -> list[tuple[str, str, str]]:
-    """Parse ``[SYSTEM]/[USER]/[ASSISTANT]`` blocks from a prompt corpus."""
+@lru_cache(maxsize=1)
+def _pin_memory_enabled() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        torch.empty(1).pin_memory()
+    except Exception:
+        return False
+    return True
+
+
+def _parse_tagged_blocks(
+    prompt_path: str | Path,
+    section_names: dict[str, str],
+) -> list[tuple[str, ...]]:
+    """Parse ``---``-delimited blocks with named tagged sections."""
     text = Path(prompt_path).read_text(encoding="utf-8", errors="replace")
     blocks = [
         block.strip() for block in re.split(r"(?m)^---\s*$", text) if block.strip()
     ]
-    pairs: list[tuple[str, str, str]] = []
-    section_names = {
-        "[SYSTEM]": "system",
-        "[USER]": "user",
-        "[ASSISTANT]": "assistant",
-    }
+    parsed: list[tuple[str, ...]] = []
+    ordered_sections = tuple(dict.fromkeys(section_names.values()))
 
     for idx, block in enumerate(blocks, start=1):
-        sections: dict[str, list[str]] = {
-            "system": [],
-            "user": [],
-            "assistant": [],
-        }
+        sections: dict[str, list[str]] = {name: [] for name in ordered_sections}
         current: str | None = None
         for raw_line in block.splitlines():
             stripped = raw_line.strip()
@@ -259,16 +267,69 @@ def _parse_prompt_pairs(prompt_path: str | Path) -> list[tuple[str, str, str]]:
                 continue
             sections[current].append(raw_line)
 
-        system = "\n".join(sections["system"]).strip()
-        user = "\n".join(sections["user"]).strip()
-        assistant = "\n".join(sections["assistant"]).strip()
-        if not system or not user or not assistant:
-            raise ValueError(
-                f"Prompt block {idx} is missing one of SYSTEM/USER/ASSISTANT"
-            )
-        pairs.append((system, user, assistant))
+        values = tuple("\n".join(sections[name]).strip() for name in ordered_sections)
+        if any(not value for value in values):
+            expected = "/".join(name.strip("[]") for name in section_names)
+            raise ValueError(f"Prompt block {idx} is missing one of {expected}")
+        parsed.append(values)
 
-    return pairs
+    return parsed
+
+
+def _parse_prompt_pairs(prompt_path: str | Path) -> list[tuple[str, str, str]]:
+    """Parse ``[SYSTEM]/[USER]/[ASSISTANT]`` blocks from a prompt corpus."""
+    parsed = _parse_tagged_blocks(
+        prompt_path,
+        {
+            "[SYSTEM]": "system",
+            "[USER]": "user",
+            "[ASSISTANT]": "assistant",
+        },
+    )
+    return [(system, user, assistant) for system, user, assistant in parsed]
+
+
+def _parse_dpo_pairs(prompt_path: str | Path) -> list[tuple[str, str, str, str]]:
+    """Parse ``[SYSTEM]/[USER]/[CHOSEN]/[REJECTED]`` blocks."""
+    parsed = _parse_tagged_blocks(
+        prompt_path,
+        {
+            "[SYSTEM]": "system",
+            "[USER]": "user",
+            "[CHOSEN]": "chosen",
+            "[REJECTED]": "rejected",
+        },
+    )
+    return [
+        (system, user, chosen, rejected) for system, user, chosen, rejected in parsed
+    ]
+
+
+def _build_preference_pair(
+    prompt_toks: list[int],
+    response_toks: list[int],
+    *,
+    eot: int,
+    seq_len: int,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    chunk = seq_len + 1
+    buf = prompt_toks + response_toks + [eot]
+    mask_buf = [True] * len(prompt_toks) + [False] * len(response_toks) + [True]
+    if len(buf) < chunk:
+        pad_len = chunk - len(buf)
+        buf = buf + [eot] * pad_len
+        mask_buf = mask_buf + [True] * pad_len
+
+    seq = buf[-chunk:]
+    seq_mask = mask_buf[-chunk:]
+    inp = torch.tensor(seq[:-1], dtype=torch.long)
+    tgt = torch.tensor(seq[1:], dtype=torch.long)
+    is_prompt = torch.tensor(seq_mask[1:], dtype=torch.bool)
+    tgt[is_prompt] = -100
+    tgt[tgt == eot] = -100
+    if not (tgt != -100).any():
+        return None
+    return inp, tgt
 
 
 class CorpusDataset(IterableDataset):
@@ -312,7 +373,7 @@ def corpus_dataloader(
         dataset,
         batch_size=batch_size,
         num_workers=0,  # single-file read; no benefit from multiple workers
-        pin_memory=True,
+        pin_memory=_pin_memory_enabled(),
     )
 
 
@@ -378,5 +439,67 @@ def prompt_dataloader(
         dataset,
         batch_size=batch_size,
         num_workers=0,
-        pin_memory=True,
+        pin_memory=_pin_memory_enabled(),
+    )
+
+
+class DPODataset(IterableDataset):
+    """Iterable preference dataset over chosen/rejected response pairs."""
+
+    def __init__(
+        self,
+        prompt_path: str | Path,
+        tokenizer: TiktokenWrapper,
+        seq_len: int = 512,
+    ) -> None:
+        self.prompt_path = Path(prompt_path)
+        self.tokenizer = tokenizer
+        self.seq_len = seq_len
+
+    def __iter__(self):
+        eot = self.tokenizer.eot_token
+
+        for system, user, chosen, rejected in _parse_dpo_pairs(self.prompt_path):
+            prompt_text = (
+                "[SYSTEM]\n" f"{system}\n\n" "[USER]\n" f"{user}\n\n" "[ASSISTANT]\n"
+            )
+            prompt_toks = self.tokenizer.encode(prompt_text)
+            chosen_toks = self.tokenizer.encode(chosen)
+            rejected_toks = self.tokenizer.encode(rejected)
+            if not chosen_toks or not rejected_toks:
+                continue
+
+            chosen_pair = _build_preference_pair(
+                prompt_toks,
+                chosen_toks,
+                eot=eot,
+                seq_len=self.seq_len,
+            )
+            rejected_pair = _build_preference_pair(
+                prompt_toks,
+                rejected_toks,
+                eot=eot,
+                seq_len=self.seq_len,
+            )
+            if chosen_pair is None or rejected_pair is None:
+                continue
+
+            chosen_inp, chosen_tgt = chosen_pair
+            rejected_inp, rejected_tgt = rejected_pair
+            yield chosen_inp, chosen_tgt, rejected_inp, rejected_tgt
+
+
+def dpo_dataloader(
+    prompt_path: str | Path,
+    tokenizer: TiktokenWrapper,
+    seq_len: int = 512,
+    batch_size: int = 1,
+) -> DataLoader:
+    """Return a ``DataLoader`` over chosen/rejected preference examples."""
+    dataset = DPODataset(prompt_path, tokenizer, seq_len)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=0,
+        pin_memory=_pin_memory_enabled(),
     )

@@ -50,6 +50,34 @@
         </div>
 
         <div class="form-check form-switch mt-3">
+          <input class="form-check-input" type="checkbox" id="tuned-toggle"
+                 {% if inference_checkpoint.using_tuned %}checked{% endif %}
+                 {% if not inference_checkpoint.tuned_exists %}disabled{% endif %}>
+          <label class="form-check-label" for="tuned-toggle">Use fine-tuned checkpoint</label>
+          <div class="form-text text-muted">
+            {% if inference_checkpoint.tuned_exists %}
+            Switch between {{ inference_checkpoint.base_name }} and {{ inference_checkpoint.tuned_name }}.
+            {% else %}
+            No fine-tuned checkpoint found for this model.
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="form-check form-switch mt-3">
+          <input class="form-check-input" type="checkbox" id="dpo-toggle"
+                 {% if inference_checkpoint.using_dpo %}checked{% endif %}
+                 {% if not inference_checkpoint.dpo_exists %}disabled{% endif %}>
+          <label class="form-check-label" for="dpo-toggle">Use DPO checkpoint</label>
+          <div class="form-text text-muted">
+            {% if inference_checkpoint.dpo_exists %}
+            Switch between {{ inference_checkpoint.base_name }} and {{ inference_checkpoint.dpo_name }}.
+            {% else %}
+            No DPO checkpoint found for this model.
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="form-check form-switch mt-3">
           <input class="form-check-input" type="checkbox" id="censor-toggle" checked>
           <label class="form-check-label text-muted" for="censor-toggle">Censor offensive words</label>
         </div>
@@ -86,6 +114,8 @@
   const btnStop   = document.getElementById('btn-stop');
   const badge     = document.getElementById('status-badge');
   const censorEl  = document.getElementById('censor-toggle');
+  const tunedEl   = document.getElementById('tuned-toggle');
+  const dpoEl     = document.getElementById('dpo-toggle');
 
   // Sync range slider labels
   [['max-tokens', v => v], ['temperature', v => parseFloat(v).toFixed(2)], ['top-p', v => parseFloat(v).toFixed(2)]].forEach(([id, fmt]) => {
@@ -152,6 +182,40 @@
     if (evtSource) { evtSource.close(); evtSource = null; }
     setGenerating(false);
   });
+
+  async function selectCheckpoint(payload) {
+    try {
+      const response = await fetch('/ui/inference/checkpoint/select', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json();
+      if (!result.ok) {
+        alert(result.error || 'Checkpoint switch failed.');
+      }
+    } catch (error) {
+      alert('Checkpoint switch failed: ' + error.message);
+    } finally {
+      window.location.reload();
+    }
+  }
+
+  if (tunedEl) {
+    tunedEl.addEventListener('change', async () => {
+      tunedEl.disabled = true;
+      if (tunedEl.checked && dpoEl) dpoEl.checked = false;
+      await selectCheckpoint({ use_tuned: tunedEl.checked, use_dpo: false });
+    });
+  }
+
+  if (dpoEl) {
+    dpoEl.addEventListener('change', async () => {
+      dpoEl.disabled = true;
+      if (dpoEl.checked && tunedEl) tunedEl.checked = false;
+      await selectCheckpoint({ use_tuned: false, use_dpo: dpoEl.checked });
+    });
+  }
 
   // Re-render existing output immediately when the censor toggle changes
   censorEl.addEventListener('change', () => {

@@ -29,6 +29,8 @@ from .auth import (
 )
 from .generation import generate_tokens
 from ..model.registry import MODEL_REGISTRY, get_model_entry, load_model
+from ..training.dataset import DEFAULT_CORPUS, DEFAULT_DPO
+from ..training.finetune import auto_rate_completion, tuned_checkpoint_name
 
 ui_router = APIRouter()
 
@@ -57,6 +59,47 @@ def _active_checkpoint_path(app) -> Path:
     if checkpoint_path is not None:
         return Path(checkpoint_path)
     return Path(get_model_entry(_active_model_id(app)).checkpoint_path)
+
+
+def _base_checkpoint_path(app) -> Path:
+    checkpoint_path = _active_checkpoint_path(app)
+    suffix = checkpoint_path.suffix or ".pt"
+    for variant in (f"_tuned{suffix}", f"_dpo{suffix}"):
+        if checkpoint_path.name.endswith(variant):
+            base_name = checkpoint_path.name[: -len(variant)] + suffix
+            return checkpoint_path.with_name(base_name)
+    return checkpoint_path
+
+
+def _tuned_checkpoint_path(app) -> Path:
+    base_path = _base_checkpoint_path(app)
+    return base_path.with_name(tuned_checkpoint_name(base_path.name))
+
+
+def _dpo_checkpoint_path(app) -> Path:
+    base_path = _base_checkpoint_path(app)
+    suffix = base_path.suffix or ".pt"
+    return base_path.with_name(f"{base_path.stem}_dpo{suffix}")
+
+
+def _inference_checkpoint_info(app) -> dict:
+    base_path = _base_checkpoint_path(app)
+    tuned_path = _tuned_checkpoint_path(app)
+    dpo_path = _dpo_checkpoint_path(app)
+    active_path = _active_checkpoint_path(app)
+    return {
+        "active_path": str(active_path),
+        "base_path": str(base_path),
+        "base_name": base_path.name,
+        "tuned_path": str(tuned_path),
+        "tuned_name": tuned_path.name,
+        "tuned_exists": tuned_path.exists(),
+        "using_tuned": active_path == tuned_path,
+        "dpo_path": str(dpo_path),
+        "dpo_name": dpo_path.name,
+        "dpo_exists": dpo_path.exists(),
+        "using_dpo": active_path == dpo_path,
+    }
 
 
 def _checkpoint_info(app) -> dict:
@@ -105,6 +148,50 @@ def _training_defaults(config) -> dict[str, int | float | str]:
     }
 
 
+def _release_current_model(app) -> None:
+    current_model = getattr(app.state, "model", None)
+    if current_model is None:
+        return
+    current_model.to("cpu")
+    del current_model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _load_model_from_checkpoint(
+    model_id: str, checkpoint_path: Path, device
+) -> tuple[torch.nn.Module, object, str]:
+    entry = get_model_entry(model_id)
+    config = entry.config_cls()
+    model = entry.model_cls(config)
+
+    ckpt = torch.load(checkpoint_path, weights_only=False, map_location=device)
+    state_dict = (
+        ckpt["model_state_dict"]
+        if isinstance(ckpt, dict) and "model_state_dict" in ckpt
+        else ckpt
+    )
+    model.load_state_dict(state_dict, strict=False)
+    model.to(device)
+    model.eval()
+    return model, config, str(checkpoint_path)
+
+
+def _load_selected_model(
+    app, model_id: str, checkpoint_path: Path | None = None
+) -> tuple:
+    device = getattr(
+        app.state,
+        "device",
+        torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    )
+    _release_current_model(app)
+    if checkpoint_path is None:
+        return load_model(model_id, device)
+    return _load_model_from_checkpoint(model_id, checkpoint_path, device)
+
+
 # ---------------------------------------------------------------------------
 # Inference UI
 # ---------------------------------------------------------------------------
@@ -118,6 +205,7 @@ async def inference_page(request: Request, _: None = Depends(require_auth)):
         context={
             "available_models": _available_models(request.app),
             "active_model": _active_model_id(request.app),
+            "inference_checkpoint": _inference_checkpoint_info(request.app),
         },
     )
 
@@ -201,6 +289,11 @@ class ModelSelectRequest(BaseModel):
     model_id: str
 
 
+class InferenceCheckpointSelectRequest(BaseModel):
+    use_tuned: bool = False
+    use_dpo: bool = False
+
+
 @ui_router.get("/train")
 async def train_page(request: Request, _: None = Depends(require_auth)):
     app = request.app
@@ -245,20 +338,7 @@ async def select_model(
             "error": "Cannot switch models while fine-tuning is running.",
         }
 
-    device = getattr(
-        app.state,
-        "device",
-        torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-    )
-    current_model = getattr(app.state, "model", None)
-    if current_model is not None:
-        current_model.to("cpu")
-        del current_model
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    model, config, checkpoint_path = load_model(body.model_id, device)
+    model, config, checkpoint_path = _load_selected_model(app, body.model_id)
     app.state.model = model
     app.state.model_config = config
     app.state.active_model_id = body.model_id
@@ -266,6 +346,65 @@ async def select_model(
     app.state.rlhf_optimizer = None
     app.state.rlhf_pending = None
     return {"ok": True, "model_id": body.model_id}
+
+
+@ui_router.post("/ui/inference/checkpoint/select")
+async def select_inference_checkpoint(
+    body: InferenceCheckpointSelectRequest,
+    request: Request,
+    _: None = Depends(require_auth),
+):
+    app = request.app
+
+    process = getattr(app.state, "training_process", None)
+    if process is not None and process.returncode is None:
+        return {
+            "ok": False,
+            "error": "Cannot switch checkpoints while training is running.",
+        }
+
+    thread = getattr(app.state, "finetune_thread", None)
+    if thread is not None and thread.is_alive():
+        return {
+            "ok": False,
+            "error": "Cannot switch checkpoints while fine-tuning is running.",
+        }
+
+    if body.use_tuned and body.use_dpo:
+        return {"ok": False, "error": "Cannot select both tuned and DPO checkpoints."}
+
+    model_id = _active_model_id(app)
+    checkpoint_path: Path | None = None
+    if body.use_tuned:
+        checkpoint_path = _tuned_checkpoint_path(app)
+        if not checkpoint_path.exists():
+            return {
+                "ok": False,
+                "error": f"Fine-tuned checkpoint not found: {checkpoint_path}",
+            }
+    elif body.use_dpo:
+        checkpoint_path = _dpo_checkpoint_path(app)
+        if not checkpoint_path.exists():
+            return {
+                "ok": False,
+                "error": f"DPO checkpoint not found: {checkpoint_path}",
+            }
+
+    model, config, active_checkpoint_path = _load_selected_model(
+        app, model_id, checkpoint_path
+    )
+    app.state.model = model
+    app.state.model_config = config
+    app.state.active_checkpoint_path = active_checkpoint_path
+    app.state.rlhf_optimizer = None
+    app.state.rlhf_pending = None
+    return {
+        "ok": True,
+        "model_id": model_id,
+        "use_tuned": body.use_tuned,
+        "use_dpo": body.use_dpo,
+        "checkpoint_path": active_checkpoint_path,
+    }
 
 
 @ui_router.post("/ui/train/start")
@@ -419,14 +558,21 @@ async def train_logs_sse(request: Request, _: None = Depends(require_auth)):
 # Fine-tuning UI  (/tune)
 # ---------------------------------------------------------------------------
 
-_DEFAULT_CORPUS = "data/corpus.md"
-
 
 class TuneStartRequest(BaseModel):
-    corpus_path: str = _DEFAULT_CORPUS
+    corpus_path: str = DEFAULT_CORPUS
     epochs: int = 1
     batch_size: int = 1
     lr: float = 1e-4
+    max_steps: Optional[int] = None
+
+
+class DpoStartRequest(BaseModel):
+    dpo_path: str = DEFAULT_DPO
+    epochs: int = 1
+    batch_size: int = 1
+    lr: float = 1e-5
+    beta: float = 0.1
     max_steps: Optional[int] = None
 
 
@@ -447,7 +593,7 @@ async def tune_page(request: Request, _: None = Depends(require_auth)):
     app = request.app
     config = _active_config(app)
     thread = app.state.finetune_thread
-    is_sft_running = thread is not None and thread.is_alive()
+    is_finetune_running = thread is not None and thread.is_alive()
 
     return _templates.TemplateResponse(
         request,
@@ -455,9 +601,10 @@ async def tune_page(request: Request, _: None = Depends(require_auth)):
         context={
             "checkpoint": _checkpoint_info(app),
             "config": {f.name: getattr(config, f.name) for f in fields(config)},
-            "is_sft_running": is_sft_running,
+            "is_finetune_running": is_finetune_running,
             "finetune_status": app.state.finetune_status,
-            "default_corpus": _DEFAULT_CORPUS,
+            "default_corpus": DEFAULT_CORPUS,
+            "default_dpo": DEFAULT_DPO,
             "available_models": _available_models(app),
             "active_model": _active_model_id(app),
             "artifact": _artifact_info(app),
@@ -487,10 +634,10 @@ async def tune_sft_start(
     model = app.state.model
     tokenizer = app.state.tokenizer
 
-    from ..training.finetune import sft_finetune
+    from ..training.finetune import sft_finetune, tuned_checkpoint_name
 
     config = _active_config(app)
-    checkpoint_name = _active_checkpoint_path(app).name
+    checkpoint_name = tuned_checkpoint_name(_active_checkpoint_path(app).name)
 
     def run():
         try:
@@ -518,8 +665,69 @@ async def tune_sft_start(
     return {"ok": True}
 
 
+@ui_router.post("/ui/tune/dpo/start")
+async def tune_dpo_start(
+    body: DpoStartRequest, request: Request, _: None = Depends(require_auth)
+):
+    app = request.app
+    thread = app.state.finetune_thread
+    if thread is not None and thread.is_alive():
+        return {"ok": False, "error": "Fine-tuning is already in progress."}
+
+    dpo_path = Path(body.dpo_path)
+    if not dpo_path.exists():
+        return {"ok": False, "error": f"DPO file not found: {body.dpo_path}"}
+
+    stop_event = threading.Event()
+    app.state.finetune_stop_event = stop_event
+    app.state.finetune_log_lines.clear()
+    app.state.finetune_status = "dpo"
+
+    model = app.state.model
+    tokenizer = app.state.tokenizer
+
+    from ..training.finetune import dpo_finetune
+
+    config = _active_config(app)
+
+    def run():
+        try:
+            dpo_finetune(
+                model,
+                tokenizer,
+                config,
+                dpo_path=body.dpo_path,
+                epochs=body.epochs,
+                batch_size=body.batch_size,
+                lr=body.lr,
+                beta=body.beta,
+                max_steps=body.max_steps,
+                stop_event=stop_event,
+                log_fn=lambda line: app.state.finetune_log_lines.append(line),
+            )
+        except Exception as exc:
+            app.state.finetune_log_lines.append(f"[DPO] Error: {exc}")
+        finally:
+            app.state.finetune_status = "idle"
+
+    t = threading.Thread(target=run, daemon=True, name="dpo-finetune")
+    app.state.finetune_thread = t
+    t.start()
+    return {"ok": True}
+
+
 @ui_router.post("/ui/tune/sft/stop")
 async def tune_sft_stop(request: Request, _: None = Depends(require_auth)):
+    app = request.app
+    thread = app.state.finetune_thread
+    if thread is None or not thread.is_alive():
+        return {"ok": False, "error": "No fine-tuning is running."}
+    app.state.finetune_stop_event.set()
+    return {"ok": True}
+
+
+@ui_router.post("/ui/tune/dpo/stop")
+async def tune_dpo_stop(request: Request, _: None = Depends(require_auth)):
     app = request.app
     thread = app.state.finetune_thread
     if thread is None or not thread.is_alive():
@@ -566,7 +774,7 @@ async def tune_rlhf_generate(
     if thread is not None and thread.is_alive():
         return {
             "ok": False,
-            "error": "SFT is running — wait for it to finish before starting an RLHF round.",
+            "error": "Fine-tuning is running — wait for it to finish before starting an RLHF round.",
         }
 
     model = app.state.model
@@ -642,6 +850,10 @@ async def tune_rlhf_rate(
     loop = asyncio.get_running_loop()
 
     def _run_step():
+        blended_rewards = [
+            (0.7 * float(rating)) + (0.3 * auto_rate_completion(completion))
+            for rating, completion in zip(body.ratings, completions)
+        ]
         return rlhf_step(
             model,
             optimizer,
@@ -649,7 +861,7 @@ async def tune_rlhf_rate(
             config,
             prompt=prompt,
             completions=completions,
-            rewards=[float(r) for r in body.ratings],
+            rewards=blended_rewards,
         )
 
     loss = await loop.run_in_executor(None, _run_step)
