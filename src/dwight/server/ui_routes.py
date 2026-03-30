@@ -618,7 +618,7 @@ async def tune_sft_start(
     from ..training.finetune import sft_finetune, tuned_checkpoint_name
 
     config = _active_config(app)
-    checkpoint_name = tuned_checkpoint_name(_active_checkpoint_path(app).name)
+    checkpoint_name = tuned_checkpoint_name(_base_checkpoint_path(app).name)
 
     def run():
         try:
@@ -670,7 +670,7 @@ async def tune_dpo_start(
     from ..training.finetune import dpo_finetune, dpo_checkpoint_name
 
     config = _active_config(app)
-    checkpoint_name = dpo_checkpoint_name(_active_checkpoint_path(app).name)
+    checkpoint_name = dpo_checkpoint_name(_base_checkpoint_path(app).name)
 
     def run():
         try:

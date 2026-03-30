@@ -49,32 +49,26 @@
           <button id="btn-stop"     class="btn btn-outline-danger" disabled>Stop</button>
         </div>
 
-        <div class="form-check form-switch mt-3">
-          <input class="form-check-input" type="checkbox" id="tuned-toggle"
-                 {% if inference_checkpoint.using_tuned %}checked{% endif %}
-                 {% if not inference_checkpoint.tuned_exists %}disabled{% endif %}>
-          <label class="form-check-label" for="tuned-toggle">Use fine-tuned checkpoint</label>
-          <div class="form-text text-muted">
+        <div class="mb-3 mt-3">
+          <label for="submodel-select" class="form-label">Submodel</label>
+          <select id="submodel-select" class="form-select">
+            <option value="base"
+              {% if not inference_checkpoint.using_tuned and not inference_checkpoint.using_dpo %}selected{% endif %}>
+              {{ inference_checkpoint.base_name }} (base)
+            </option>
             {% if inference_checkpoint.tuned_exists %}
-            Switch between {{ inference_checkpoint.base_name }} and {{ inference_checkpoint.tuned_name }}.
-            {% else %}
-            No fine-tuned checkpoint found for this model.
+            <option value="tuned"
+              {% if inference_checkpoint.using_tuned %}selected{% endif %}>
+              {{ inference_checkpoint.tuned_name }} (fine-tuned)
+            </option>
             {% endif %}
-          </div>
-        </div>
-
-        <div class="form-check form-switch mt-3">
-          <input class="form-check-input" type="checkbox" id="dpo-toggle"
-                 {% if inference_checkpoint.using_dpo %}checked{% endif %}
-                 {% if not inference_checkpoint.dpo_exists %}disabled{% endif %}>
-          <label class="form-check-label" for="dpo-toggle">Use DPO checkpoint</label>
-          <div class="form-text text-muted">
             {% if inference_checkpoint.dpo_exists %}
-            Switch between {{ inference_checkpoint.base_name }} and {{ inference_checkpoint.dpo_name }}.
-            {% else %}
-            No DPO checkpoint found for this model.
+            <option value="dpo"
+              {% if inference_checkpoint.using_dpo %}selected{% endif %}>
+              {{ inference_checkpoint.dpo_name }} (DPO)
+            </option>
             {% endif %}
-          </div>
+          </select>
         </div>
 
         <div class="form-check form-switch mt-3">
@@ -113,9 +107,8 @@
   const btnGen    = document.getElementById('btn-generate');
   const btnStop   = document.getElementById('btn-stop');
   const badge     = document.getElementById('status-badge');
-  const censorEl  = document.getElementById('censor-toggle');
-  const tunedEl   = document.getElementById('tuned-toggle');
-  const dpoEl     = document.getElementById('dpo-toggle');
+  const censorEl     = document.getElementById('censor-toggle');
+  const submodelEl   = document.getElementById('submodel-select');
 
   // Sync range slider labels
   [['max-tokens', v => v], ['temperature', v => parseFloat(v).toFixed(2)], ['top-p', v => parseFloat(v).toFixed(2)]].forEach(([id, fmt]) => {
@@ -201,19 +194,11 @@
     }
   }
 
-  if (tunedEl) {
-    tunedEl.addEventListener('change', async () => {
-      tunedEl.disabled = true;
-      if (tunedEl.checked && dpoEl) dpoEl.checked = false;
-      await selectCheckpoint({ use_tuned: tunedEl.checked, use_dpo: false });
-    });
-  }
-
-  if (dpoEl) {
-    dpoEl.addEventListener('change', async () => {
-      dpoEl.disabled = true;
-      if (dpoEl.checked && tunedEl) tunedEl.checked = false;
-      await selectCheckpoint({ use_tuned: false, use_dpo: dpoEl.checked });
+  if (submodelEl) {
+    submodelEl.addEventListener('change', async () => {
+      submodelEl.disabled = true;
+      const val = submodelEl.value;
+      await selectCheckpoint({ use_tuned: val === 'tuned', use_dpo: val === 'dpo' });
     });
   }
 

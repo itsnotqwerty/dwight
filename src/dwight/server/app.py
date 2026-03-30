@@ -40,7 +40,7 @@ async def _lifespan(app: FastAPI):
     app.state.finetune_status: str = "idle"  # type: ignore
     app.state.finetune_stop_event: threading.Event = threading.Event()  # type: ignore
     app.state.rlhf_optimizer = None  # lazy Adam; created on first RLHF step
-    app.state.rlhf_pending: dict | None = None  # holds current round prompt+completions
+    app.state.rlhf_pending: dict | None = None  # type: ignore # holds current round prompt+completions
     yield
     # Terminate any running training subprocess on shutdown
     if app.state.training_process is not None:
