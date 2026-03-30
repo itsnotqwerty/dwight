@@ -80,6 +80,13 @@ def tuned_checkpoint_name(checkpoint_name: str) -> str:
     return f"{path.stem}_tuned{suffix}"
 
 
+def dpo_checkpoint_name(checkpoint_name: str) -> str:
+    """Return a sibling DPO checkpoint name for *checkpoint_name*."""
+    path = Path(checkpoint_name)
+    suffix = path.suffix or ".pt"
+    return f"{path.stem}_dpo{suffix}"
+
+
 def _clamp_score(score: float) -> float:
     return max(-1.0, min(1.0, score))
 
@@ -498,9 +505,6 @@ def dpo_finetune(
                 f"  beta={beta:.3f}"
             )
 
-        if interrupted:
-            break
-
         avg_loss = running_loss / max(n_batches, 1)
         log_fn(f"[DPO] Epoch {epoch} complete — avg loss: {avg_loss:.4f}")
         _save_checkpoint(
@@ -513,6 +517,9 @@ def dpo_finetune(
             log_fn,
             prefix="[DPO]",
         )
+
+        if interrupted:
+            break
 
     model.eval()
     log_fn("[DPO] Fine-tuning finished.")

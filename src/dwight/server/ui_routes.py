@@ -28,6 +28,7 @@ from .auth import (
     set_session_cookie,
 )
 from .generation import generate_tokens
+from .model_manager import load_checkpoint, release_current_model
 from ..model.registry import MODEL_REGISTRY, get_model_entry, load_model
 from ..training.dataset import DEFAULT_CORPUS, DEFAULT_DPO
 from ..training.finetune import auto_rate_completion, tuned_checkpoint_name
@@ -149,33 +150,13 @@ def _training_defaults(config) -> dict[str, int | float | str]:
 
 
 def _release_current_model(app) -> None:
-    current_model = getattr(app.state, "model", None)
-    if current_model is None:
-        return
-    current_model.to("cpu")
-    del current_model
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    release_current_model(app)
 
 
 def _load_model_from_checkpoint(
     model_id: str, checkpoint_path: Path, device
 ) -> tuple[torch.nn.Module, object, str]:
-    entry = get_model_entry(model_id)
-    config = entry.config_cls()
-    model = entry.model_cls(config)
-
-    ckpt = torch.load(checkpoint_path, weights_only=False, map_location=device)
-    state_dict = (
-        ckpt["model_state_dict"]
-        if isinstance(ckpt, dict) and "model_state_dict" in ckpt
-        else ckpt
-    )
-    model.load_state_dict(state_dict, strict=False)
-    model.to(device)
-    model.eval()
-    return model, config, str(checkpoint_path)
+    return load_checkpoint(model_id, checkpoint_path, device)
 
 
 def _load_selected_model(
@@ -186,10 +167,10 @@ def _load_selected_model(
         "device",
         torch.device("cuda" if torch.cuda.is_available() else "cpu"),
     )
-    _release_current_model(app)
+    release_current_model(app)
     if checkpoint_path is None:
         return load_model(model_id, device)
-    return _load_model_from_checkpoint(model_id, checkpoint_path, device)
+    return load_checkpoint(model_id, checkpoint_path, device)
 
 
 # ---------------------------------------------------------------------------
@@ -686,9 +667,10 @@ async def tune_dpo_start(
     model = app.state.model
     tokenizer = app.state.tokenizer
 
-    from ..training.finetune import dpo_finetune
+    from ..training.finetune import dpo_finetune, dpo_checkpoint_name
 
     config = _active_config(app)
+    checkpoint_name = dpo_checkpoint_name(_active_checkpoint_path(app).name)
 
     def run():
         try:
@@ -704,6 +686,7 @@ async def tune_dpo_start(
                 max_steps=body.max_steps,
                 stop_event=stop_event,
                 log_fn=lambda line: app.state.finetune_log_lines.append(line),
+                checkpoint_name=checkpoint_name,
             )
         except Exception as exc:
             app.state.finetune_log_lines.append(f"[DPO] Error: {exc}")

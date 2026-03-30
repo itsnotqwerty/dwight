@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 from pathlib import Path
@@ -28,6 +29,7 @@ async def _lifespan(app: FastAPI):
     app.state.active_model_id = "dwight"
     app.state.active_checkpoint_path = checkpoint_path
     app.state.available_models = list(MODEL_REGISTRY)
+    app.state.model_lock = asyncio.Lock()
     app.state.device = device
     app.state.tokenizer = tokenizer
     app.state.training_process = None

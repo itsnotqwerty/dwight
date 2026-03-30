@@ -144,7 +144,7 @@ def test_inference_checkpoint_toggle_switches_to_tuned(
 
     monkeypatch.setattr(
         ui_routes_module,
-        "_load_model_from_checkpoint",
+        "load_checkpoint",
         fake_load_model_from_checkpoint,
     )
 
@@ -155,6 +155,7 @@ def test_inference_checkpoint_toggle_switches_to_tuned(
         "ok": True,
         "model_id": "dwight",
         "use_tuned": True,
+        "use_dpo": False,
         "checkpoint_path": str(tuned_ckpt),
     }
     app = cast(FastAPI, client.app)
